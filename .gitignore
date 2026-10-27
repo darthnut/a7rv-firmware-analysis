@@ -1,0 +1,20 @@
+# Never commit the firmware image or anything derived from it byte-for-byte.
+*.bin
+*.img
+*.fdat
+*.dat
+
+# Ghidra project data
+*.gpr
+*.rep/
+*.lock
+
+# Raw capture files from the test session (large; summarize into RESULTS.md instead)
+*.ARW
+*.arw
+*.RAW
+
+# OS / editor cruft
+Thumbs.db
+desktop.ini
+.DS_Store
