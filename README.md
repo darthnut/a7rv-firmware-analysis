@@ -1,19 +1,42 @@
-# Sony a7R V — focus-bracket cadence investigation
+# Sony a7R V — firmware analysis
 
-Reverse-engineering my own a7R V's firmware to answer one question: **why do some
-in-camera focus-bracket stacks run slow (~0.60 s/frame) while others run fast
-(~0.43 s/frame)?** Is the slowdown a settings/flash effect I can fix today, or
-something in the firmware?
+**Purpose.** An analysis of the Sony a7R V's firmware. The goal is to understand how
+the camera works and to identify potential areas for improvement through firmware
+modification. This is reverse engineering of my own camera, for interoperability and
+understanding — **no Sony firmware is redistributed here**, only byte offsets and
+derived analysis.
 
-> **Status — read this first.**
-> Static analysis is complete. The candidate firmware patch below is **untested on
-> hardware and its benefit is unproven.** We currently *doubt* it's the real
-> bottleneck (see [Why we're skeptical](#why-were-skeptical-it-matters)). An
-> empirical cadence test settles it — results will land in
-> [RESULTS.md](RESULTS.md). **Do not flash anything on the strength of this repo
-> alone.**
+> **Working ethos.** Map first, measure before modifying, and never present an
+> untested change as a mod to flash. Where an investigation turns up a candidate
+> firmware lever, it's documented as a *hypothesis* with its evidence and its risk,
+> not a recipe. Modifying and flashing camera firmware can permanently brick the
+> device; anything here is acted on only on a body someone is willing to lose, and
+> only once there's a measured reason to.
+
+## How this is organized
+
+- **Investigations** — each one states what we wanted to improve, what the binary
+  actually shows, and whether there's a firmware lever worth pursuing. The first is
+  below.
+- **[docs/method.md](docs/method.md)** — shared tooling, the Ghidra setup, the
+  `movw`/`movt` address-resolution trap, and a running address reference.
+- **[docs/patch.md](docs/patch.md)** — detailed risk write-up for any candidate
+  patch.
+- **[TESTING.md](TESTING.md)** / **[RESULTS.md](RESULTS.md)** — empirical protocols
+  and their measured results, because the binary only tells half the story.
 
 ---
+
+# Investigation 1 — focus-bracket cadence
+
+**The question:** why do some in-camera focus-bracket stacks run slow
+(~0.60 s/frame) while others run fast (~0.43 s/frame)? Is the slowdown a
+settings/flash effect fixable today, or something in the firmware?
+
+> **Status — read first.** Static analysis is complete. The candidate firmware patch
+> below is **untested on hardware and its benefit is unproven.** We currently *doubt*
+> it's the real bottleneck (see [Why we're skeptical](#why-were-skeptical-it-matters)).
+> An empirical cadence test settles it — results in [RESULTS.md](RESULTS.md).
 
 ## TL;DR
 
@@ -31,8 +54,6 @@ something in the firmware?
 - So the honest next step is **measurement, not flashing**: a controlled cadence
   test (flash on/off first) to find what actually paces the slow stacks.
 
----
-
 ## Background: the VD field quantization
 
 The capture pipeline is clocked by a "VD" scheduler.
@@ -45,8 +66,6 @@ The capture pipeline is clocked by a "VD" scheduler.
 Because cadence is quantized to whole fields, the 26-field case is a hard floor —
 whatever causes the slow case adds *ten discrete fields*, it doesn't smear the
 timing. That's the shape of the thing we're hunting.
-
----
 
 ## The gate (what we found)
 
@@ -87,8 +106,6 @@ Reading it out:
   (`FUN_00B6C2F2`) as a byte-sized message of `r + 0x14`. **This is a request-message
   staging pool, not image data.**
 
----
-
 ## The candidate patch (a hypothesis — not validated)
 
 Relax the 2× headroom to 1× so the check demands only what it consumes
@@ -108,8 +125,6 @@ were confirmed present in the shipping `cpapp-b.bin`.
 > write-up. Short version: the benefit is unproven, the target looks like a
 > trace/request path rather than the capture pacer, and flashing *any* modified
 > firmware can permanently brick the camera.
-
----
 
 ## Why we're skeptical it matters
 
@@ -131,8 +146,6 @@ This is the honest part, and it's why we test before we flash:
 In other words: static analysis found a lever, but we can't show it's connected to
 the thing we want to move.
 
----
-
 ## What actually settles it: the cadence test
 
 Before anyone considers firmware, measure what paces the slow stacks. Prime
@@ -141,9 +154,9 @@ pressure. The full protocol is in [TESTING.md](TESTING.md); measured results go 
 [RESULTS.md](RESULTS.md).
 
 If the test shows the slowdown is flash/shutter/settings, the firmware angle is
-moot and this repo stands as a "here's what it *isn't*" write-up. If it points at
-write-pipeline backlog, *then* the gate becomes worth a hardware trial — on a body
-someone is willing to lose.
+moot and this investigation stands as a "here's what it *isn't*" write-up. If it
+points at write-pipeline backlog, *then* the gate becomes worth a hardware trial —
+on a body someone is willing to lose.
 
 ---
 
@@ -164,5 +177,5 @@ someone is willing to lose.
   derived analysis.
 - Nothing here is validated on hardware. Modifying and flashing camera firmware can
   **permanently brick** the device and will void any warranty. If you act on this,
-  do it only on a body you are prepared to lose, and only after the empirical test
+  do it only on a body you are prepared to lose, and only after an empirical test
   gives a reason to.
