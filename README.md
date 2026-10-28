@@ -256,8 +256,9 @@ dead ends.
   string (e.g. imager-mode, power-save, and drive commands). This is a reference for
   any future tether/remote work. Note: the **external** exposure layer (PTP / the
   Creators' App remote API) is **not** in `cpapp` — no PTP strings there; it lives in
-  the USB-gadget / network daemons on a15, unanalyzed. The full catalog is kept in the
-  working notes rather than committed here.
+  the USB-gadget / network daemons on a15, unanalyzed. The full catalog is committed as
+  [`docs/command-table.txt`](docs/command-table.txt) — 306 FW commands + 102 property
+  handlers with handler/checker offsets and names (offsets only, no firmware bytes).
 - **`ImagerSeqLog` — the camera's own timing instrument.** The sequence logger that
   would let us split the ~11-field focus overhead empirically (see Investigation 1's
   open items) was located: log sites call a trace-category gate (`0x278B8C`, channel
@@ -370,6 +371,30 @@ RE of Sony updater crypto) already defeats. The access vector is **physical USB 
 camera**, and nothing here has been exercised on hardware; it is documented as a
 mapped design weakness.
 
+## Cross-validation against Sony-PMCA-RE
+
+The a7R V's SENSER stack was checked directly against `ma1co`'s public reference client
+([`Sony-PMCA-RE`](https://github.com/ma1co/Sony-PMCA-RE)), which implements this exact
+system. Three results:
+
+- **Keys — byte-identical.** The three 512-byte auth keys extracted from the a7R V's
+  `libsencore.so` match `constants.senserKeysSha256` in the public repo byte-for-byte.
+  Sony did **not** rotate the SENSER keys into Gen5 (confirmatory — nothing new, but it
+  anchors everything else).
+- **Auth wire format — matches their client.** The handshake decoded here lines up with
+  `Sony-PMCA-RE`'s `SonySenserAuthDevice`: a big-endian `{u16 cmd, u16 salt, 512-B data}`
+  packet with the command sent *inverted*; `HOP` (cmd 1) → `STEP` (cmd 3,
+  `SHA256(challenge ‖ key[level])`) → `JUMP`, three levels, then `KICK` (cmd 5) executes.
+- **USB identity — a split.** The a7R V updater-mode PID (`0x03E2`, read from the updater
+  UDID) is **already** in their `sony.py`. The senser-mode PIDs and vendor requests we
+  noted earlier (`0x02a9`/`0x0336`, `0x37ff`/`0xd7aa`) are **their generic constants**,
+  *not* values from a7R V firmware — and the a7R V's *actual* senser-mode VID/PID is
+  **provisioned at runtime** (kernel gadget `usbg_sen.ko`, no static descriptor), so it
+  can't be read from the image and would need hardware to confirm.
+
+Net: the a7R V reuses ma1co's SENSER system essentially unchanged; what is genuinely new
+is narrow (see [What's actually new for the a7R V](#whats-actually-new-for-the-a7r-v)).
+
 ## The command surface, and an open route for others
 
 A later pass mapped the camera's internal command table and assessed what actually
@@ -387,8 +412,8 @@ deliberately left as a direction, not a tool.
 - As everywhere else in this firmware, **nothing references the table statically**:
   commands are matched by id and dispatched through the runtime-registered path, so the
   individual verb *semantics* are not recoverable without running the code. The full id
-  list stays in the working notes, not committed here (same policy as the earlier
-  catalog).
+  list is committed as [`docs/command-table.txt`](docs/command-table.txt) (ids + handler/
+  checker offsets + names, no firmware bytes).
 
 **The connection route — not new ground.** Reading *live* internal state means a client
 that completes the handshake and reads responses back — and that client already exists:
