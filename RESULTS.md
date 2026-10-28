@@ -7,7 +7,8 @@ resolution — confirmed fine enough to resolve a 0.3–0.6 s cadence). 1 VD fie
 
 ## Setup
 
-- Camera: ILCE-7RM5 (a7R V), tethered USB, PC Remote. Firmware version: _TODO_.
+- Camera: ILCE-7RM5 (a7R V), tethered USB, PC Remote. Firmware **version 4.00** —
+  the same firmware version as the `cpapp-b.bin` analyzed in this repo.
 - Lens: 100 mm macro, tripod, static subject. Drive: **Focus Bracket**.
 - Save destination: **PC + Camera card** (both) for all stacks below.
 - RAW-L, ~60 MB/frame.
