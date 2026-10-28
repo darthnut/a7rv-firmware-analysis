@@ -347,6 +347,55 @@ RE of Sony updater crypto) already defeats. The access vector is **physical USB 
 camera**, and nothing here has been exercised on hardware; it is documented as a
 mapped design weakness.
 
+## The command surface, and an open route for others
+
+A later pass mapped the camera's internal command table and assessed what actually
+*using* the service channel would take. Both are recorded as findings; the second is
+deliberately left as a direction, not a tool.
+
+**Command table (static).** The firmware command-dispatch table was located in `cpapp`
+(region `0xFF6E4C`–`0xFF8FE4`), 20-byte entries of
+`{u16 id, handler fn, flags, checker fn}`:
+
+- **306 FW commands** (id families `0x40xx` / `0x41xx`, ASCII `@`/`A`) — e.g. `0x4152`
+  (`"AR"`) is the verified `SET_FOCUS_BRK_EXEC_STATE`, the focus-bracket trigger from
+  Investigation 1.
+- **102 property handlers** (`0x78xxxx`) — the GET/query layer.
+- As everywhere else in this firmware, **nothing references the table statically**:
+  commands are matched by id and dispatched through the runtime-registered path, so the
+  individual verb *semantics* are not recoverable without running the code. The full id
+  list stays in the working notes, not committed here (same policy as the earlier
+  catalog).
+
+**An open route — stated, not provided.** With the channel and the three-level
+authentication fully mapped, the one remaining step to read *live* internal state
+(rather than static firmware) is a client that completes the handshake and reads the
+responses back. The protocol and auth codec have been validated offline, so this is a
+**known-feasible route, not a hypothesis.** But **this repo does not ship a working
+client, the extracted key material, or a connection procedure** — the implementation is
+kept private on purpose. The route is noted here so others can take the research
+further; anyone weighing it should weigh why it's left where it is:
+
+- **A working client is a universal unlock, not a personal one.** The keys are shared
+  across every body of this model, so a functioning tool opens service mode on *all* of
+  them, not just the author's own camera — a different object from the analysis here.
+- **"Read-only" can't be guaranteed in this mode.** The post-auth verb table is
+  runtime-registered — its command set is *not* fully known from static analysis
+  (above) — and the mode is the factory **calibration/adjustment** interface, not a
+  developer sandbox. A wrong command can alter sensor calibration or brick the body,
+  with no user-level recovery.
+- Anyone who does explore it should do so only **on a camera they own and are prepared
+  to lose**, and **observe-first**: enumerate and read before issuing anything that
+  could write.
+
+This is the honest edge of the project — the lock is understood down to its keys and the
+door *can* be opened, but opening it is a hardware-risk, universal-access step that
+belongs to whoever takes that risk on their own equipment, not to a published tool.
+
+---
+
+# Investigation 3 — a7R VI firmware (blocked)
+
 **The question:** can the same approach read the newer a7R VI body firmware?
 
 **Answer: no — blocked at the crypto, and no feature claims are made from it.** The a7R
