@@ -388,7 +388,10 @@ that completes the handshake and reads responses back — and that client alread
 implementation of this exact SENSER system, which (per the credit note above) the a7R V
 reuses with the same keys. This repo doesn't duplicate it. Extending it to the a7R V
 would be ordinary device-support work plus **verification on real hardware, which has
-not been done here** — the local tooling has only passed an offline selftest.
+not been done here** — the local tooling has only passed an offline selftest. (Emulation
+was assessed as a safer verifier — `ma1co`'s OpenMemories-QEMU — but it models older
+Sony SoCs; bringing up the a7R V's CXD90057 / BIONZ XR would be a substantial project of
+its own, so hardware remains the only practical check.)
 
 The real caution is **not** secrecy — the keys and protocol are public — but the
 **device**:
@@ -405,19 +408,32 @@ The real caution is **not** secrecy — the keys and protocol are public — but
 ## What's actually new for the a7R V
 
 Setting aside everything `ma1co` already published, the genuinely a7R V-specific
-findings here are modest — and **none is verified on hardware:**
+findings here are modest — and **anything touching the live device is unverified** (no
+hardware test):
 
 - **The SENSER keys are unrotated into Gen5 / BIONZ XR.** The a7R V (ILCE-7RM5) takes
   the same `senserKeysSha256` values as earlier bodies — a confirmation that Sony never
   rotated them, not a code change.
-- **Two commands not in the PMCA-RE map:** `MSS` start / stop (`0x920202` / `0x920203`).
-- **An a7R V `PacketData` verb registry that is built at runtime** — so its command ids
-  aren't recoverable statically and would need live enumeration.
+- **`MSS` start / stop (`0x920202` / `0x920203`) — decoded.** Not in the PMCA-RE map;
+  it's a *relay*, posting a 4-word sync message to UIPC queue `0x80924220` for another
+  subsystem to consume (not a local service). The consumer isn't in the `cpapp` image.
+- **The C3P / UIPC fabric behind the gate** — the shared cross-processor queue, the
+  adjustment channel (`0x3D025F`) with its log-pull verbs, and the `UU` / `AA` mode
+  files — mapped with offsets (see Investigation 2, and the `cpapp` closure in
+  Investigation 1).
+- **USB identity isn't statically recoverable.** The a7R V's senser-mode VID/PID is
+  provisioned at runtime by a kernel USB gadget (`usbg_sen.ko`), with no static
+  descriptor in the image — so static analysis **cannot** supply the camera's device
+  identity, and confirming it needs hardware. (The updater-mode PID `0x03E2` is already
+  known upstream.)
+- **The `PacketData` verb registry is built at runtime**, so its command ids aren't
+  recoverable statically — live enumeration only.
 - Separately, the focus-bracket cadence work (Investigation 1) is original to this
   project and unrelated to PMCA.
 
-That is the honest scope of what could go upstream as a7R V support: a short list of
-deltas and one confirmation, pending someone verifying them on an actual body.
+That is the honest scope of what could go upstream: mostly **documentation** of the
+Gen5 service stack and the updater container layout (see Investigation 3), plus the
+deltas above — with the USB identity and the runtime verb table left for hardware.
 
 ---
 
@@ -432,6 +448,17 @@ is **fully encrypted** — entropy 8.00/8 throughout, no plaintext islands. The 
 (Gen5) AES keys were tested against every plausible header / frame / trailer split and
 produced **zero valid checksums**: they do not apply. The 338 MB size (vs the a7R V's
 751 MB plaintext) suggests a **partial / delta** package rather than a full image.
+
+For reference, the a7R V updater the keys *do* open has this container layout — our
+mapping, with **no keys or payload reproduced**: an `89 55 46 55 0d 0a 1a 0a` magic,
+then big-endian `{u32 size, u32 tag}` chunks — `DATV` (format version: `1` on the a7R V,
+`4` on the a7R VI), `PROV`, `UDID` (92 bytes on the a7R V, 44 on the a7R VI), the `FDAT`
+payload, and `DEND` + a CRC-32 over the preceding bytes. `FDAT` is 1024-byte frames
+(each a 2-byte word-sum checksum + a flags word, `bit15` = last frame), the first frame's
+leading 512 bytes under a header cipher, and a trailer of a 16-byte IV plus a 256-byte
+RSA-2048 signature. The AES decryption of that payload is the community's work (credited
+below), not ours; the **container framing** is what this project mapped, and it is the
+shareable part.
 
 Reading it would require the a7R VI generation's updater keys (the kind of thing that
 historically comes from community RE of the updater), or a flash dump taken off the
