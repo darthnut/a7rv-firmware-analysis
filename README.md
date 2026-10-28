@@ -20,8 +20,8 @@ derived analysis.
   below.
 - **[docs/method.md](docs/method.md)** — shared tooling, the Ghidra setup, the
   `movw`/`movt` address-resolution trap, and a running address reference.
-- **[docs/patch.md](docs/patch.md)** — detailed risk write-up for any candidate
-  patch.
+- **[docs/patch.md](docs/patch.md)** — detailed risk write-up for the one candidate
+  patch we found.
 - **[TESTING.md](TESTING.md)** / **[RESULTS.md](RESULTS.md)** — empirical protocols
   and their measured results, because the binary only tells half the story.
 
@@ -29,49 +29,101 @@ derived analysis.
 
 # Investigation 1 — focus-bracket cadence
 
-**The question:** why do some in-camera focus-bracket stacks run slow
-(~0.60 s/frame) while others run fast (~0.43 s/frame)? Is the slowdown a
-settings/flash effect fixable today, or something in the firmware?
+**The question:** why do some in-camera focus-bracket stacks run slow while others
+run fast? Is the slowdown a settings/flash effect fixable today, something physical,
+or a firmware lever worth pursuing?
 
-> **Status — read first.** Static analysis is complete. The candidate firmware patch
-> below is **untested on hardware and its benefit is unproven.** We currently *doubt*
-> it's the real bottleneck (see [Why we're skeptical](#why-were-skeptical-it-matters)).
-> An empirical cadence test settles it — results in [RESULTS.md](RESULTS.md).
+> **Status — settled.** Two independent lines of evidence now converge: a controlled
+> bench test (cadence measured from EXIF capture timestamps, [RESULTS.md](RESULTS.md))
+> and a complete static reverse-engineering sweep of `cpapp-b.bin`. **Neither the
+> fast-zone cadence nor the slowdown is a tunable camera-firmware constant.** The one
+> patch we found is real but low-value. The honest answer is below.
 
 ## TL;DR
 
-- The fast/slow split is a clean **+10 VD "fields"** (~166.8 ms) added per frame.
-  The 26-field fast cadence is an architectural floor (VD scheduler quantization);
-  no firmware lever lowers it.
-- Static RE of `cpapp-b.bin` mapped the VD scheduler and surfaced exactly one
-  plausible firmware lever: a **buffer-full gate** with a conservative *2× headroom*
-  policy and a known **2-byte relaxation**.
-- **But that gate guards a ~16 KB STP request-*message* staging pool, not an image
-  buffer.** Pixel data never traverses it; it literally logs
-  `[STP_ERROR]: BUFFER FULL!!!` and latches trace off when full. Its causal link to
-  the +10-field slowdown is **plausible but unproven**, and it reads more like a
-  trace/request path than the capture pacer.
-- So the honest next step is **measurement, not flashing**: a controlled cadence
-  test (flash on/off first) to find what actually paces the slow stacks.
+Focus-bracket cadence has **two regimes, two different limiters — neither one a
+camera-firmware timer:**
+
+- **Short stacks (≤ ~44 frames): paced by focus-step overhead.** A fastest-burst
+  reference (no focus stepping) runs ~**9 VD fields** (0.151 s ≈ 6.6 fps) — the
+  capture+write ceiling. Focus Bracket's fast zone runs ~**20 fields** (0.34 s). The
+  gap, **~11 fields (~0.19 s) per frame, is the lens physically moving and settling
+  between shots** — identical tethered vs untethered, flash on vs off. Static RE
+  confirms this is **not a firmware delay**: the "Focus Step Width" menu loads a move
+  *distance*, not a timer, and there is **not a single kernel-sleep call in the entire
+  ~1,300-function focus-bracket sequencer.** The settle lives in the lens (MCU /
+  lens-file data), not in `cpapp`.
+- **Long stacks (> ~44 frames): paced by the write-pipeline cliff.** The buffer
+  absorbs ~44 frames at full speed, then cadence collapses to the sustained
+  write/transfer rate. Static RE locates the *shape* of this stall (an SDF
+  develop-resource acquire retry loop) but shows the **buffer pool itself lives in a
+  different binary — the develop subsystem (`av-cam.bin`), not `cpapp`.** No
+  image-buffer depth constant exists in `cpapp` to tune.
+
+The original fast/slow memory maps onto **pre-cliff vs post-cliff** (and onto the
+save path: card-only post-cliff ≈ 36 fields, tethered-to-both ≈ 95–116 fields).
+
+**The one firmware lever we found — a 2-byte relaxation of an STP buffer-full gate —
+is real and verified in the binary, but touches neither the 11-field focus overhead
+nor the write cliff.** It is documented below for completeness, not recommended.
 
 ## Background: the VD field quantization
 
 The capture pipeline is clocked by a "VD" scheduler.
 
 - 1 VD field = **500 ticks = 16.6833 ms**.
-- Fast focus-bracket cadence = **26 fields ≈ 0.434 s/frame**.
-- Slow cadence = **36 fields ≈ 0.599 s/frame**.
-- Difference = **+10 fields ≈ 166.8 ms**, consistently.
+- Cadence is quantized to whole fields. Measured points: **9 fields** (burst ceiling),
+  **~20 fields** (focus-bracket fast zone, tethered), **~36 fields** (card-only slow
+  stacks, post-cliff), **~95–116 fields** (tethered-to-both, post-cliff).
 
-Because cadence is quantized to whole fields, the 26-field case is a hard floor —
-whatever causes the slow case adds *ten discrete fields*, it doesn't smear the
-timing. That's the shape of the thing we're hunting.
+Because cadence is quantized, the differences are discrete field counts, not smeared
+timing — which is what let the bench test and the disassembly line up frame-for-frame.
 
-## The gate (what we found)
+## What paces it — the decomposition
+
+Measured on the bench (see [RESULTS.md](RESULTS.md)), then cross-checked against the
+binary:
+
+| regime | cadence | what limits it | firmware lever? |
+|---|---|---|---|
+| burst, no focus step | **9 fields** (0.151 s) | capture + write ceiling | n/a (this is the floor) |
+| focus-bracket, fast zone (≤~44 frames) | **20 fields** (0.34 s) | **lens move + settle** (~11 fields on top of capture) | **no** — physical; no delay constant in `cpapp` |
+| focus-bracket, past the cliff | 36–116 fields | **write pipeline** at buffer-full | not in `cpapp` — pool is in `av-cam.bin` |
+
+The ~11-field focus-step overhead decomposes (bench-anchored bounds, static-informed
+split) as: lens physical move ~5–8 fields (per-lens, in the lens motor/data), 2–3
+VD-quantized comm hops where **the send/reply slots are reported by the lens**, and
+≤4 fields of camera-side margin guards. The only part that lives in the camera and is
+even arguably tunable is those ≤4 fields of margin — and they're lens-protocol-timing
+risky (see the lever table).
+
+## Static analysis — what is, and isn't, in `cpapp`
+
+A full sweep of the focus-bracket and capture paths in `cpapp-b.bin` (Ghidra, ~1,300
+decompiled sequencer functions) established these, each grounded in the binary with
+offsets and decompiled evidence:
+
+- **The focus-step calculator** is at file `0x27D2F0` / VA `0x3852F0`. Per-frame lens
+  target = start/last position ± step, where
+  `step = TABLE[idx] × (lens_ctx[0xE] >> 1) × dir`, clamped to the lens near/far
+  limits. The **step table** is at file `0x27D384` / VA `0x385384`: 10 × u16,
+  `{32, 42, 53, 64, 74, 85, 96, 106, 117, 128}` (verified byte-for-byte). The menu
+  "Focus Step Width" selects where on this ramp a run operates — so a larger width is
+  a **larger physical move per frame, not a longer delay.**
+- **Zero kernel-sleep calls** (the `FUN_005CAAFC` sleep primitive) exist anywhere in
+  the decompiled sequencer set. There is **no camera-side settle/delay constant** in
+  the focus path to trim. This is the decisive negative for the short-stack regime.
+- **The write cliff's stall shape** is an SDF develop-resource acquire retry loop —
+  `ModuleRcBase::ExecRcAcquire`, file `0x3484F0` / VA `0x4504F0`: the acquire returns
+  `0x80` (busy) and the loop retries up to 100 times, posting a wait message each
+  pass. But the **buffer pool behind that acquire chain lives in the cross-processor
+  develop manager (`av-cam.bin`), not `cpapp`** — no image-buffer depth constant
+  surfaced in any `cpapp` sweep.
+
+## The one lever we found: the STP buffer-full gate (real, but low-value)
 
 Function at **file offset `0x4196B4`** (Ghidra VA `0x5216B4`; load base `0x108000`,
-so VA = file offset + `0x108000`). The relevant branch, from the Ghidra
-decompilation:
+so VA = file offset + `0x108000`). The relevant branch:
 
 ```c
 if (param_2 == 4) {
@@ -91,72 +143,62 @@ if (DAT_019d22c0 == '\x01') {
 }
 ```
 
-Reading it out:
+- **Availability check** demands `need = 0x28 + 2·r`; **actual consumption** is
+  `consume = 0x14 + r` — roughly **2× headroom**, pure policy slack.
+- **Pool counter** `DAT_0115E994` initializes to **16364 (≈16 KB)**; xref analysis
+  (95k resolved `movw`/`movt` refs) shows **only this gate** touches it. It is a
+  **~16 KB request-*message* staging pool, not image data** — it literally logs
+  `[STP_ERROR]: BUFFER FULL!!!` and latches trace off when full.
 
-- **Availability check:** `need = 0x28 + 2·r` where `r` is the request size.
-- **Actual consumption:** `consume = 0x14 + r`.
-- The check demands roughly **2× what it consumes** — conservative headroom, i.e.
-  pure policy slack. On a "full" verdict it logs `[STP_ERROR]: BUFFER FULL!!!`, sets
-  a sticky flag, and **latches the whole STP path off** (`DAT_0119424a = 0`).
-- **Pool counter:** RAM `DAT_0115E994`, initialized to **16364 (≈16 KB)**.
-  `16384 − 16364 = 20 = 0x14` — exactly one message's fixed overhead. Ghidra xref
-  analysis (across 95k resolved `movw`/`movt` refs) shows **only this gate** reads or
-  writes the counter: it's one-sided, advisory bookkeeping.
-- After accounting, it hands the request to the mailbox send function
-  (`FUN_00B6C2F2`) as a byte-sized message of `r + 0x14`. **This is a request-message
-  staging pool, not image data.**
-
-## The candidate patch (a hypothesis — not validated)
-
-Relax the 2× headroom to 1× so the check demands only what it consumes
-(`need` becomes `0x14 + r`):
+**The candidate patch** relaxes the 2× headroom to 1×:
 
 | file offset | before | after | instruction change |
 |---|---|---|---|
 | `0x41973E` | `28` | `14` | `movs r1,#0x28` → `movs r1,#0x14` |
 | `0x419746` | `40` | `00` | `add.w r2,r1,r0,lsl#1` → `add.w r2,r1,r0` |
 
-Two bytes. Re-disassembled before/after with capstone; surrounding instructions are
-unchanged. The original bytes (`28 21` at `0x41973E`, `01 eb 40 02` at `0x419744`)
-were confirmed present in the shipping `cpapp-b.bin`.
+Two bytes, re-disassembled before/after with capstone; original bytes confirmed in
+the shipping `cpapp-b.bin`. See [docs/patch.md](docs/patch.md) for the risk write-up.
 
-> ### ⚠ Do not treat this as a mod to flash.
-> It is an analysis artifact. See [docs/patch.md](docs/patch.md) for the full risk
-> write-up. Short version: the benefit is unproven, the target looks like a
-> trace/request path rather than the capture pacer, and flashing *any* modified
-> firmware can permanently brick the camera.
+> ### ⚠ Why this isn't the answer.
+> The bench test and the static sweep agree that this gate guards a trace/request
+> message pool that is **distinct from the SDF/develop path governing the ~44-frame
+> write cliff**, and it has nothing to do with the physical focus-step overhead that
+> paces the short stacks actually shot. It is a real, verified lever that moves
+> neither of the two things that actually pace focus bracketing. Do not treat it as a
+> mod to flash.
 
-## Why we're skeptical it matters
+## Lever table (final)
 
-This is the honest part, and it's why we test before we flash:
+| candidate lever | where | verdict |
+|---|---|---|
+| STP message-gate 2×→1× headroom | file `0x41973E`/`0x419746` | **real, verified — but low-value**; touches neither the 11-field overhead nor the write cliff |
+| focus-step settle constant | — | **does not exist** (zero sleeps in the path) |
+| step-width table shrink | file `0x27D384` | works, but it's the **existing menu setting** by another name (pure geometry — smaller moves, but more frames for the same depth) |
+| VD comm-window margins | file `0x3B5C26`/`0x9EEA46` | ≤4 fields best case, **lens-protocol-timing risk** (slots are lens-defined) |
+| write-cliff buffer depth | — | **not in `cpapp`** — lives in the develop subsystem (`av-cam.bin`), unanalyzed |
 
-1. **It's a message/trace pool, not an image buffer.** Pixel data never passes
-   through it. A gate on trace-message staging has no obvious reason to add ten
-   whole VD fields to capture cadence.
-2. **The 2× headroom is conservative slack** that plausibly guards a
-   replenisher-lag accounting race — and we never located the replenisher, so we
-   can't prove removing the slack is safe or even relevant.
-3. **Worst case of the relaxed gate is handled**, by static reading: a marginal
-   request passes the check and then fails downstream, producing a handled
-   type-`0xF` fallback message → a dropped/retried STP request. Not corruption, not
-   a brick — *per static analysis, which is not a hardware guarantee.*
-4. **The +10-field mechanism itself is still unexplained.** Nothing ties it
-   specifically to this gate. The link is plausible-unproven.
+## Practical takeaways (no firmware needed)
 
-In other words: static analysis found a lever, but we can't show it's connected to
-the thing we want to move.
+- **Keep stacks ≤ ~44 frames** to stay in the fast zone; deep stacks hit the write
+  wall.
+- To go faster in the fast zone, the real levers are physical: a **smaller focus-step
+  width** (shorter lens moves) or a **faster-focusing lens** — the camera firmware has
+  no delay to trim there.
+- To push the cliff later / raise the post-cliff rate: **compressed / lossless RAW**
+  (smaller files), a **faster card**, and a lighter save path (card-only beats
+  tethered-to-both). These are measured next steps, not firmware.
 
-## What actually settles it: the cadence test
+## Where this could still go (outside `cpapp`)
 
-Before anyone considers firmware, measure what paces the slow stacks. Prime
-suspects, in order: **flash recycle**, pipeline warm-up, shutter mode, write
-pressure. The full protocol is in [TESTING.md](TESTING.md); measured results go in
-[RESULTS.md](RESULTS.md).
+Two avenues remain, both beyond what the current analysis covers:
 
-If the test shows the slowdown is flash/shutter/settings, the firmware angle is
-moot and this investigation stands as a "here's what it *isn't*" write-up. If it
-points at write-pipeline backlog, *then* the gate becomes worth a hardware trial —
-on a body someone is willing to lose.
+1. **`av-cam.bin` (the develop subsystem).** The ~44-frame write-buffer pool lives
+   here, not in `cpapp`. If any image-buffer depth is tunable, this is where it would
+   be — unanalyzed so far.
+2. **Dynamic instrumentation.** Splitting the ~11-field focus overhead empirically
+   into lens-move vs comm-hop (e.g. via the firmware's own `ImagerSeqLog`) would
+   confirm the static inference and bound exactly how much, if any, is camera-side.
 
 ---
 
@@ -168,6 +210,8 @@ on a body someone is willing to lose.
   builds RAM addresses with immediate pairs, not literal pools — a naïve literal
   scan finds nothing, which is a trap). Byte-level checks with a standalone Python
   verifier.
+- Empirical cadence measured from each frame's EXIF `DateTimeOriginal` +
+  `SubSecTimeOriginal`, segmented into stacks by time gap and reported in VD fields.
 - See [docs/method.md](docs/method.md) for detail.
 
 ## Legal & safety

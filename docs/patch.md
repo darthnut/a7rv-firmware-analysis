@@ -59,8 +59,21 @@ By static reading of the surrounding code:
 side channels, and anything the decompiler got subtly wrong. Flashing modified
 firmware can permanently brick a camera.
 
-## Bottom line
+## Bottom line — resolved, and the answer is no
 
-Do not flash this to settle the cadence question. Run [the test](../TESTING.md)
-first. The patch only earns a hardware trial if the measured data implicates the
-write pipeline — and even then, only on a body someone is willing to lose.
+The cadence test has since run ([RESULTS.md](../RESULTS.md)), and a full static sweep
+followed. Both point the same way:
+
+- The fast-zone cadence is **physical focus-step overhead** (lens move + settle), with
+  **no camera-firmware delay constant** anywhere in the focus path — so this patch
+  cannot touch it.
+- The long-stack slowdown **is** the write pipeline, but the controlling buffer pool
+  lives in the **develop subsystem (`av-cam.bin`), reached via the SDF acquire path
+  (`ExecRcAcquire`, VA `0x4504F0`) — a *different* subsystem from this STP message
+  gate.** So the one condition under which this patch would have earned a trial turned
+  out to point at a different binary.
+
+This patch is a **real, verified** 2-byte change that relaxes a conservative headroom
+policy on a trace/request-message pool. It is kept here as an analysis artifact. It is
+**not** the lever for focus-bracket cadence, and there is no measured reason to flash
+it.
