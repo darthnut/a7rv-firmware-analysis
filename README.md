@@ -58,11 +58,12 @@ camera-firmware timer:**
   lens-file data), not in `cpapp`.
 - **Long stacks (> ~44 frames): paced by the write-pipeline cliff.** The buffer
   absorbs ~44 frames at full speed, then cadence collapses to the sustained
-  write/transfer rate. Static RE locates the *shape* of this stall (an SDF
-  develop-resource acquire retry loop) and establishes that **no image-buffer depth
-  constant exists in `cpapp`.** The acquire chain leads *off-processor* toward the
-  develop subsystem (presumably `av-cam.bin`, which we did not analyze), so the pool
-  isn't in the binary we have.
+  write/transfer rate. The stall is an SDF develop-resource acquire retry loop whose
+  server now **traces fully into `av-cam.bin`** (the develop subsystem — opened and
+  analyzed; the acquire chain, resource server, and memory manager all live there). The
+  key result: the pool's size is **runtime-configured** (`CdMemMgr` / `SetMemArea`), so
+  the ~44-frame depth is emergent from boot-time byte-capacity vs frame size — there is
+  **no patchable depth constant anywhere**, in `cpapp` or `av-cam`.
 
 The original fast/slow memory maps onto **pre-cliff vs post-cliff** (and onto the
 save path: card-only post-cliff ≈ 36 fields, tethered-to-both ≈ 95–116 fields).
@@ -92,7 +93,7 @@ binary:
 |---|---|---|---|
 | burst, no focus step | **9 fields** (0.151 s) | capture + write ceiling | n/a (this is the floor) |
 | focus-bracket, fast zone (≤~44 frames) | **20 fields** (0.34 s) | **lens move + settle** (~11 fields on top of capture) | **no** — physical; no delay constant in `cpapp` |
-| focus-bracket, past the cliff | 36–116 fields | **write pipeline** at buffer-full | not in `cpapp` — pool is off-processor (presumably `av-cam.bin`, unanalyzed) |
+| focus-bracket, past the cliff | 36–116 fields | **write pipeline** at buffer-full | in `av-cam.bin` (develop subsystem) — runtime-configured, **no static constant** |
 
 The ~11-field focus-step overhead decomposes (bench-anchored bounds, static-informed
 split) as: lens physical move ~5–8 fields (per-lens, in the lens motor/data), 2–3
@@ -119,10 +120,13 @@ offsets and decompiled evidence:
   the focus path to trim. This is the decisive negative for the short-stack regime.
 - **The write cliff's stall shape** is an SDF develop-resource acquire retry loop —
   `ModuleRcBase::ExecRcAcquire`, file `0x3484F0` / VA `0x4504F0`: the acquire returns
-  `0x80` (busy) and the loop retries up to 100 times, posting a wait message each
-  pass. That acquire chain leads to a **cross-processor develop manager** (presumably
-  `av-cam.bin`, not analyzed here), and **no image-buffer depth constant surfaced in any
-  `cpapp` sweep** — so the pool isn't in the binary we have.
+  `0x80` (busy) and the loop retries up to 100 times. That chain now **traces fully into
+  `av-cam.bin`** (10,654 functions, opened and analyzed): the server-side `ExecRcAcquire`
+  (`FUN_01058430`) → `rcct_Acquire` → `RcDriver::AcquireSeqCtrl`, which walks four
+  exec-ctrl objects — any busy returns the `0x80` the `cpapp` client sees. The memory
+  behind them (`CdMemMgr`) is **configured at runtime** (`SetMemArea_ENC/DEC`), so the
+  ~44-frame depth is emergent from boot-time byte-capacity — **not a static constant**,
+  in `cpapp` or `av-cam`.
 
 ## The one lever we found: the STP buffer-full gate (real, but low-value)
 
@@ -193,7 +197,7 @@ the shipping `cpapp-b.bin`. See [docs/patch.md](docs/patch.md) for the risk writ
 | focus-step settle constant | — | **does not exist** (zero sleeps in the path) |
 | step-width table shrink | file `0x27D384` | works, but it's the **existing menu setting** by another name (pure geometry — smaller moves, but more frames for the same depth) |
 | VD comm-window margins | file `0x3B5C26`/`0x9EEA46` | ≤4 fields best case, **lens-protocol-timing risk** (slots are lens-defined) |
-| write-cliff buffer depth | — | **not in `cpapp`** — off-processor in the develop subsystem (presumably `av-cam.bin`), unanalyzed |
+| write-cliff buffer depth | — | **in `av-cam.bin`** (develop subsystem, verified) — runtime-configured (`CdMemMgr`/`SetMemArea`), **no patchable constant** |
 
 ## Practical takeaways (no firmware needed)
 
@@ -208,11 +212,12 @@ the shipping `cpapp-b.bin`. See [docs/patch.md](docs/patch.md) for the risk writ
 
 ## Where this could still go (outside `cpapp`)
 
-Two avenues remain, both beyond what the current analysis covers:
+The two avenues this analysis couldn't reach from `cpapp` alone:
 
-1. **`av-cam.bin` (the develop subsystem).** The ~44-frame write-buffer pool lives
-   here, not in `cpapp`. If any image-buffer depth is tunable, this is where it would
-   be — unanalyzed so far.
+1. **`av-cam.bin` (the develop subsystem) — since analyzed; resolved.** The ~44-frame
+   write-buffer pool *is* managed here (the SDF resource server + `CdMemMgr`), as
+   suspected — but its size is **runtime-configured**, with **no tunable depth
+   constant**, so there is nothing to patch. This avenue is now closed.
 2. **Dynamic instrumentation.** Splitting the ~11-field focus overhead empirically
    into lens-move vs comm-hop (e.g. via the firmware's own `ImagerSeqLog`) would
    confirm the static inference and bound exactly how much, if any, is camera-side.

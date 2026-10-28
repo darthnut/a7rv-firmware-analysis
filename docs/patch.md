@@ -74,10 +74,11 @@ followed. Both point the same way:
   **no camera-firmware delay constant** anywhere in the focus path — so this patch
   cannot touch it.
 - The long-stack slowdown **is** the write pipeline, but the controlling buffer pool is
-  **off-processor**: the SDF acquire path (`ExecRcAcquire`, VA `0x4504F0`) leads toward
-  the develop subsystem (presumably `av-cam.bin`, not analyzed here) — a *different*
-  subsystem from this STP message gate. So the one condition under which this patch would
-  have earned a trial turned out to point at a different binary.
+  in **`av-cam.bin`** (the develop subsystem, now analyzed) — the SDF resource server and
+  `CdMemMgr`, a *different* subsystem from this STP message gate. Its size is
+  **runtime-configured**, so there's **no patchable constant there either**. The one
+  condition under which this patch would have earned a trial turned out to point at a
+  different binary — and an unpatchable one.
 
 This patch is a **real, verified** 2-byte change that relaxes a conservative headroom
 policy on a trace/request-message pool. It is kept here as an analysis artifact. It is

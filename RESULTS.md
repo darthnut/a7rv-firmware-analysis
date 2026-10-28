@@ -29,16 +29,18 @@ resolution — confirmed fine enough to resolve a 0.3–0.6 s cadence). 1 VD fie
 
 ## What this shows
 
-1. **The flash is not the pacer.** Flash ON and flash OFF produce the *same*
-   pre-cliff cadence (20 fields) **and the same cliff location (~frame 45).** The
-   single most common suspect for this symptom is ruled out.
+1. **The flash is not the pacer — at this flash power.** Flash ON and flash OFF produce
+   the *same* pre-cliff cadence (20 fields) **and the same cliff location (~frame 45)**
+   at the bench's low flash power (1/200). The firmware *does* carry a flash-recycle
+   interlock (see the 26-vs-20 note below) that gates each exposure on charge-complete,
+   so flash can add fields at **higher** power — but it didn't at the power tested here.
 2. **The slowdown is write-pipeline saturation.** The buffer absorbs ~44 frames at
    full speed; once full, cadence drops to the sustained write/transfer rate and
-   stays there. Static RE locates the stall shape (an SDF develop-resource acquire
-   retry loop, `ExecRcAcquire` at VA `0x4504F0`); the acquire chain leads *off-processor*
-   toward the develop subsystem (presumably `av-cam.bin`, not analyzed here), and there
-   is **no `cpapp`-side depth constant** — so this is *not* the STP message gate, and the
-   governing pool isn't in the binary we have.
+   stays there. The stall (an SDF develop-resource acquire retry loop, `ExecRcAcquire`)
+   now **traces fully into `av-cam.bin`**, the develop subsystem — the resource server
+   and its `CdMemMgr` memory manager live there. The pool's size is **runtime-configured**
+   (`SetMemArea`), so the ~44-frame depth is emergent, with **no patchable constant** in
+   `cpapp` *or* `av-cam`. (This is *not* the STP message gate.)
 3. **Buffer depth ≈ 44 frames** under these conditions (RAW-L, saving to both).
 4. **The exact slow rate depends on the write path.** Tethered-to-both here is
    ~1.7 s/frame (card write **+** USB transfer). The user's historical card-only
@@ -67,13 +69,20 @@ slow memories were longer stacks that crossed the cliff.
 ## An unreconciled loose end (old 26 vs new 20 fields)
 
 Earlier card-only data (a ~305-frame set) put the *fast* zone at **26 fields (0.43 s)**;
-this bench puts it at **20 fields (0.34 s)**, flash on and off. The old *slow* cadence
-maps cleanly onto the post-cliff rate, but the old *fast* zone (26) and the new one (20)
-are **not reconciled.** Candidate explanations, none yet confirmed: a **firmware
-version** difference (this bench is on 4.00 — the old data may predate it), a different
-**save path**, or a different **focus-step width / lens**. Flagging it rather than
-papering over it — [TESTING.md](TESTING.md) is still written around the old 26/36
-figures, while the numbers here are what firmware 4.00 actually produced.
+this bench puts it at **20 fields (0.34 s)**. The old *slow* cadence maps cleanly onto
+the post-cliff rate, but the old *fast* zone (26) and the new one (20) are **not yet
+reconciled.**
+
+The leading candidate is now a concrete firmware mechanism: a **flash-recycle
+interlock.** A release-lock manager (`cpapp` file `0x2213CC` / VA `0x3293CC`) holds an
+**`SB_CHARGE`** (strobe-charge) lock — each flash frame sets it, and the next exposure
+waits for charge-complete (a 20000-unit charge-wait at file `0x2214E8`). Recycle time is
+**power-dependent**, so the hypothesis (mechanism **read**; explanation **unverified**)
+is: the old 26-field stacks ran `f/8 · 1/80 · ISO 200` → higher flash power → ~6 fields
+of recycle per frame; this bench at `1/200` was low-power, so recycle hid under the
+20-field floor. Other causes (save path, firmware version, step width) aren't ruled out.
+The decisive test is in *Still to measure* below. ([TESTING.md](TESTING.md) is still
+written around the old 26/36 figures; the numbers here are what firmware 4.00 produced.)
 
 ## Firmware relevance (revised — honest)
 
@@ -84,12 +93,11 @@ Two regimes, two different limiters:
   2-byte buffer patch does **nothing** here. Real levers for short stacks are
   non-firmware: a **smaller focus-step width**, or a **faster-focusing lens**.
 - **Long stacks (> ~44 frames)** — paced by the **write pipeline** at the buffer
-  cliff. The SDF acquire retry loop (`ExecRcAcquire`, VA `0x4504F0`) is the stall shape,
-  and its acquire chain leads *off-processor* toward the develop subsystem (presumably
-  `av-cam.bin`, not analyzed here) — *distinct* from the STP message gate at `0x4196B4`,
-  and with **no depth constant in `cpapp`**. So no `cpapp` patch — including the 2-byte
-  STP relaxation — addresses this cliff; the pool that governs it isn't in the binary we
-  analyzed.
+  cliff. The SDF acquire retry loop (`ExecRcAcquire`) traces into **`av-cam.bin`** (the
+  develop subsystem, now analyzed): its resource server and `CdMemMgr` manage the pool,
+  whose size is **runtime-configured** — so there is **no patchable depth constant** in
+  `cpapp` *or* `av-cam`, and this is *distinct* from the STP message gate at `0x4196B4`.
+  No firmware patch in either binary addresses this cliff.
 
 **Bottom line:** for the short stacks typically shot, cadence is
 focus-mechanism-bound (lens move + settle, no camera-firmware timer). For long
@@ -98,8 +106,11 @@ patch is real and verified but moves neither regime — it is not the lever.
 
 ## Still to measure (optional)
 
+- **The 26-vs-20 decisive test** → one stack at the *old* exact settings (flash **on**,
+  `f/8`, `1/80`, ISO 200, card-only, ~50 frames). If the fast zone returns to ~26 fields
+  and the old ~36-field slow zone reproduces post-cliff, the flash-recycle interlock is
+  confirmed and the whole historical dataset reconciles with **zero firmware changes.**
 - Compressed vs uncompressed RAW → does smaller data push the cliff later / raise the
   post-cliff rate?
 - A long *untethered* stack → the card-only post-cliff rate (expect ~0.6 s / 36
   fields, matching the old slow stacks).
-- Firmware version (Menu → Setup → Version).
