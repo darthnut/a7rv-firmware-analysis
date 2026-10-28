@@ -44,3 +44,9 @@ python -I verify_gate.py
 | pool init literal (16364) | `0x1056994` | — | `ec 3f 00 00` |
 | pool counter | — | RAM `0x0115E994` | advisory; only the gate touches it |
 | mailbox send fn | `0xA642F2` | `0xB6C2F2` | `FUN_00B6C2F2`, msg bytes = r+0x14 |
+| focus step-size calc | `0x27D2F0` | `0x3852F0` | per-frame lens target = pos ± step (Inv. 1) |
+| step-width table (10×u16) | `0x27D384` | `0x385384` | `{32,42,53,64,74,85,96,106,117,128}` — distance, not a timer |
+| bracket engine states | `0x27D1C4` | `0x3851C4` | RAM `0x01775864`; stored per-state lens positions |
+| SDF resource-acquire retry | `0x3484F0` | `0x4504F0` | `ExecRcAcquire`; the >44-frame write-cliff wait shape |
+| PowerSave handler | `0x27C144` | `0x384144` | imager power sequencing (not thermal) |
+| ImagerSeqLog gate fn | `0x278B8C` | — | trace-category enable, channel `0x1C` → registry `0x4C1034` |

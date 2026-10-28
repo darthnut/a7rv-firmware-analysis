@@ -202,6 +202,77 @@ Two avenues remain, both beyond what the current analysis covers:
 
 ---
 
+# Investigation 2 — other customization surfaces
+
+**The question:** with the cadence question settled, where *else* in the firmware is
+there room to customize or improve the camera? This is a breadth-first **map**, not a
+set of mods — each surface is recorded with what the binary shows and how hard it
+would actually be to do anything with it. Nothing here is pursued to a working change.
+
+## TL;DR
+
+Five surfaces surveyed in `cpapp-b.bin` and the a15 Linux partition. The most
+interesting is a **dormant factory service stack**; the rest are reference material or
+dead ends.
+
+- **Dormant SSH / service stack (a15).** The camera ships, unused, a full SSH service
+  — `sbin/sshd`, a host-key generator, and `libInfraSSHManager.so`
+  (`network::InfraSshManager`). The boot chain is mapped: `bin/im.elf` (power/boot
+  manager, `C3P_PACKET` inter-process protocol) → `bin/sen.elf` (SENSER core v1.3.4,
+  reads a numeric "smode" from a cascade of `/boot`, `/setting`, `/var` paths) →
+  service stack. **The gate is a factory service token** (a HASP check at
+  `/setting/.hasp`) plus the right smode: SSH is provisioned only when Sony's factory
+  tool connects. *Feasibility: medium-hard — it would mean defeating the token check,
+  i.e. a focused reverse-engineering project on its own, not a setting or a flag flip.
+  Documented as a surface, not attempted.*
+- **Command-dispatcher catalog — 288 commands mapped.** Every internal
+  `SET_` / `PID_SET_` / `PUSH_` command was paired with its handler offset and log
+  string (e.g. imager-mode, power-save, and drive commands). This is a reference for
+  any future tether/remote work. Note: the **external** exposure layer (PTP / the
+  Creators' App remote API) is **not** in `cpapp` — no PTP strings there; it lives in
+  the USB-gadget / network daemons on a15, unanalyzed. The full catalog is kept in the
+  working notes rather than committed here.
+- **`ImagerSeqLog` — the camera's own timing instrument.** The sequence logger that
+  would let us split the ~11-field focus overhead empirically (see Investigation 1's
+  open items) was located: log sites call a trace-category gate (`0x278B8C`, channel
+  `0x1C`) into an ARM-side category registry, writing `{id, payload, u64 timestamp}`
+  on the same kernel timebase. **Enabling a category is a service/debug action — almost
+  certainly the same gated service stack above.** So the diagnostic win and the SSH
+  surface are the same lock.
+- **PowerSave handler** (`0x27C144` / VA `0x384144`). Imager power sequencing mapped —
+  sensor-drive register writes and training waits. This is **frame-to-frame imager
+  sleep logic, not the thermal-limit table**; the thermal constants remain unfound.
+- **Cosmetic / flags — nothing actionable.** `SysSound.bin` is a packed sound bank
+  (no plaintext, format RE needed before any replacement). A `debug_mode` string that
+  looked promising was run down and **closed**: it's a field name inside a VD-drive
+  register-dump format, not a global debug switch.
+
+**Bottom line.** The one surface with real leverage (SSH / service access, which would
+also unlock the `ImagerSeqLog` diagnostics) sits behind a factory-tool token, not a
+config flag. It's a legitimate future RE target but a substantial one, and it is only
+mapped here — not defeated.
+
+---
+
+# Investigation 3 — a7R VI firmware (blocked)
+
+**The question:** can the same approach read the newer a7R VI body firmware?
+
+**Answer: no — blocked at the crypto, and no feature claims are made from it.** The a7R
+VI update package (`BODYDATA`, ~338 MB) is the same UFU container family, but the
+package-format version has moved on (`DATV = 04` vs the a7R V's `01`) and the payload
+is **fully encrypted** — entropy 8.00/8 throughout, no plaintext islands. The a7R V
+(Gen5) AES keys were tested against every plausible header / frame / trailer split and
+produced **zero valid checksums**: they do not apply. The 338 MB size (vs the a7R V's
+751 MB plaintext) suggests a **partial / delta** package rather than a full image.
+
+Reading it would require the a7R VI generation's updater keys (the kind of thing that
+historically comes from community RE of the updater), or a flash dump taken off the
+body directly. Until then, **nothing about a7R VI features can be asserted from this
+file** — anything claimed would be speculation, and is deliberately not recorded here.
+
+---
+
 ## Method
 
 - Target: `cpapp-b.bin` (flat ARM/Thumb-2 image, Ghidra load base `0x00108000`).
