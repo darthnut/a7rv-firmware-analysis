@@ -226,7 +226,7 @@ Five surfaces surveyed in `cpapp-b.bin` and the a15 Linux partition. The most
 interesting is a **dormant factory service stack**; the rest are reference material or
 dead ends.
 
-- **Dormant SSH / service stack (a15) — authentication now decoded.** The camera
+- **Dormant SSH / service stack (a15) — decoded, then found to be prior art.** The camera
   ships, unused, a full SSH service — `sbin/sshd`, a host-key generator, and
   `libInfraSSHManager.so` (`network::InfraSshManager`). The boot chain is mapped:
   `bin/im.elf` (power/boot manager, `C3P_PACKET` inter-process protocol) →
@@ -238,8 +238,8 @@ dead ends.
   Full chain, offsets, and the security implication are in
   [the subsection below](#the-service-mode-authentication-decoded). *The earlier
   "HASP token" framing was wrong — `/setting/.hasp` is a session audit log, not the
-  gate. This is a mapped weakness, not a packaged exploit, and the key bytes are
-  deliberately not reproduced.*
+  gate. And the whole mechanism turned out to be `ma1co`'s prior public work — see the
+  credit note under the decode; the key bytes are not reproduced here either way.*
 - **Command-dispatcher catalog — 288 commands mapped.** Every internal
   `SET_` / `PID_SET_` / `PUSH_` command was paired with its handler offset and log
   string (e.g. imager-mode, power-save, and drive commands). This is a reference for
@@ -270,6 +270,18 @@ as secret as the firmware encryption." No working unlock was performed on hardwa
 this is a static map of the mechanism.
 
 ## The service-mode authentication, decoded
+
+> **Prior art — credit to `ma1co` / Sony-PMCA-RE.** After mapping this ourselves, we
+> found the whole thing had **already been reverse-engineered and published** years ago
+> by `ma1co` in [Sony-PMCA-RE](https://github.com/ma1co/Sony-PMCA-RE): the SENSER
+> protocol, the challenge-response, and the keys. Cross-checking confirmed the a7R V
+> runs the **same system with the same keys, unrotated** — the keys we extracted match
+> `senserKeysSha256` in that public repo byte-for-byte, and a working reference client
+> already exists there. **So the decode below is a re-derivation of known work, credited
+> to `ma1co`,** not an original discovery of this project. The little that does look
+> specific to the a7R V is collected under
+> [What's actually new for the a7R V](#whats-actually-new-for-the-a7r-v) at the end of
+> this investigation.
 
 All offsets in this subsection are in the **a15 Linux ELF libraries**
 (`libsencore.so`, `sen.elf`, `libInfraSSHManager.so`), not in `cpapp` — a different
@@ -367,30 +379,42 @@ deliberately left as a direction, not a tool.
   list stays in the working notes, not committed here (same policy as the earlier
   catalog).
 
-**An open route — stated, not provided.** With the channel and the three-level
-authentication fully mapped, the one remaining step to read *live* internal state
-(rather than static firmware) is a client that completes the handshake and reads the
-responses back. The protocol and auth codec have been validated offline, so this is a
-**known-feasible route, not a hypothesis.** But **this repo does not ship a working
-client, the extracted key material, or a connection procedure** — the implementation is
-kept private on purpose. The route is noted here so others can take the research
-further; anyone weighing it should weigh why it's left where it is:
+**The connection route — not new ground.** Reading *live* internal state means a client
+that completes the handshake and reads responses back — and that client already exists:
+`ma1co`'s [Sony-PMCA-RE](https://github.com/ma1co/Sony-PMCA-RE) is a public, working
+implementation of this exact SENSER system, which (per the credit note above) the a7R V
+reuses with the same keys. This repo doesn't duplicate it. Extending it to the a7R V
+would be ordinary device-support work plus **verification on real hardware, which has
+not been done here** — the local tooling has only passed an offline selftest.
 
-- **A working client is a universal unlock, not a personal one.** The keys are shared
-  across every body of this model, so a functioning tool opens service mode on *all* of
-  them, not just the author's own camera — a different object from the analysis here.
-- **"Read-only" can't be guaranteed in this mode.** The post-auth verb table is
-  runtime-registered — its command set is *not* fully known from static analysis
-  (above) — and the mode is the factory **calibration/adjustment** interface, not a
-  developer sandbox. A wrong command can alter sensor calibration or brick the body,
-  with no user-level recovery.
-- Anyone who does explore it should do so only **on a camera they own and are prepared
-  to lose**, and **observe-first**: enumerate and read before issuing anything that
-  could write.
+The real caution is **not** secrecy — the keys and protocol are public — but the
+**device**:
 
-This is the honest edge of the project — the lock is understood down to its keys and the
-door *can* be opened, but opening it is a hardware-risk, universal-access step that
-belongs to whoever takes that risk on their own equipment, not to a published tool.
+- **"Read-only" can't be guaranteed in this mode.** The post-auth verb surface includes
+  arbitrary memory write, a terminal shell, and factory **calibration/adjustment**
+  control: this is the manufacturing interface, not a developer sandbox. A wrong command
+  can alter sensor calibration or brick the body, with no user-level recovery.
+- The verb table is registered at runtime, so its full command set isn't recoverable
+  from static analysis — all the more reason to **observe-first** (enumerate and read
+  before issuing anything that writes), and only ever on **a camera you own and are
+  prepared to lose**.
+
+## What's actually new for the a7R V
+
+Setting aside everything `ma1co` already published, the genuinely a7R V-specific
+findings here are modest — and **none is verified on hardware:**
+
+- **The SENSER keys are unrotated into Gen5 / BIONZ XR.** The a7R V (ILCE-7RM5) takes
+  the same `senserKeysSha256` values as earlier bodies — a confirmation that Sony never
+  rotated them, not a code change.
+- **Two commands not in the PMCA-RE map:** `MSS` start / stop (`0x920202` / `0x920203`).
+- **An a7R V `PacketData` verb registry that is built at runtime** — so its command ids
+  aren't recoverable statically and would need live enumeration.
+- Separately, the focus-bracket cadence work (Investigation 1) is original to this
+  project and unrelated to PMCA.
+
+That is the honest scope of what could go upstream as a7R V support: a short list of
+deltas and one confirmation, pending someone verifying them on an actual body.
 
 ---
 
