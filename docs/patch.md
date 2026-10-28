@@ -40,8 +40,10 @@ one message.
   demonstrated path from "more trace-message headroom" to "fewer VD fields per
   captured frame."
 - The 2× headroom is most likely a guard against a replenisher-lag accounting race.
-  The replenisher is now located — it is **on the other processor** (the a15, via the
-  shared UIPC queue `0x8F013A`; see Investigation 1's "cross-processor closure"). Since
+  The replenisher appears to be **on the other processor**: the gate's queue
+  (`0x8F013A`) is shared cross-processor and no cpapp-side writer touches the counter
+  (see Investigation 1's "cross-processor closure") — though the a15-side write itself
+  was not observed. Either way, since
   the pool is balanced across a processor boundary, the timing of that replenish — and
   therefore whether the 2× slack is actually unnecessary — still can't be shown from
   static `cpapp` analysis alone.
@@ -71,11 +73,11 @@ followed. Both point the same way:
 - The fast-zone cadence is **physical focus-step overhead** (lens move + settle), with
   **no camera-firmware delay constant** anywhere in the focus path — so this patch
   cannot touch it.
-- The long-stack slowdown **is** the write pipeline, but the controlling buffer pool
-  lives in the **develop subsystem (`av-cam.bin`), reached via the SDF acquire path
-  (`ExecRcAcquire`, VA `0x4504F0`) — a *different* subsystem from this STP message
-  gate.** So the one condition under which this patch would have earned a trial turned
-  out to point at a different binary.
+- The long-stack slowdown **is** the write pipeline, but the controlling buffer pool is
+  **off-processor**: the SDF acquire path (`ExecRcAcquire`, VA `0x4504F0`) leads toward
+  the develop subsystem (presumably `av-cam.bin`, not analyzed here) — a *different*
+  subsystem from this STP message gate. So the one condition under which this patch would
+  have earned a trial turned out to point at a different binary.
 
 This patch is a **real, verified** 2-byte change that relaxes a conservative headroom
 policy on a trace/request-message pool. It is kept here as an analysis artifact. It is

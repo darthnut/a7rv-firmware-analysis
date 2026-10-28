@@ -49,4 +49,4 @@ python -I verify_gate.py
 | bracket engine states | `0x27D1C4` | `0x3851C4` | RAM `0x01775864`; stored per-state lens positions |
 | SDF resource-acquire retry | `0x3484F0` | `0x4504F0` | `ExecRcAcquire`; the >44-frame write-cliff wait shape |
 | PowerSave handler | `0x27C144` | `0x384144` | imager power sequencing (not thermal) |
-| ImagerSeqLog gate fn | `0x278B8C` | — | trace-category enable, channel `0x1C` → registry `0x4C1034` |
+| ImagerSeqLog gate fn | `0x278B8C` | — | trace-category enable, channel `0x1C` → selector/dispatcher `0x4C1034` → category registry `0x4BCF58`/`0x4BCE08` |

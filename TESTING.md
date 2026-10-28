@@ -6,6 +6,13 @@ effect that's fixable today, or something inherent — **before** anyone conside
 firmware patch (which is low-risk but of unproven benefit, and can't lower the
 26-field floor anyway).
 
+> **Note (post-test).** This is the original *pre-test* protocol, written around the old
+> card-only figures (26-field fast / 36-field slow). The bench test has since run — see
+> [RESULTS.md](RESULTS.md) — and on firmware 4.00 the fast zone actually measured
+> **20 fields**, with the slowdown identified as a write-pipeline cliff rather than a
+> flash/settings effect. The 26/36 framing below is kept as written for provenance; the
+> measured story is in [RESULTS.md](RESULTS.md).
+
 Cadence is read from each frame's EXIF capture clock (`DateTimeOriginal` +
 `SubSecTimeOriginal`), so the numbers come from the camera itself and a USB tether
 can't make them better or worse.

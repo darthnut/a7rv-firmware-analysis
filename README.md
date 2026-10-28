@@ -59,9 +59,10 @@ camera-firmware timer:**
 - **Long stacks (> ~44 frames): paced by the write-pipeline cliff.** The buffer
   absorbs ~44 frames at full speed, then cadence collapses to the sustained
   write/transfer rate. Static RE locates the *shape* of this stall (an SDF
-  develop-resource acquire retry loop) but shows the **buffer pool itself lives in a
-  different binary — the develop subsystem (`av-cam.bin`), not `cpapp`.** No
-  image-buffer depth constant exists in `cpapp` to tune.
+  develop-resource acquire retry loop) and establishes that **no image-buffer depth
+  constant exists in `cpapp`.** The acquire chain leads *off-processor* toward the
+  develop subsystem (presumably `av-cam.bin`, which we did not analyze), so the pool
+  isn't in the binary we have.
 
 The original fast/slow memory maps onto **pre-cliff vs post-cliff** (and onto the
 save path: card-only post-cliff ≈ 36 fields, tethered-to-both ≈ 95–116 fields).
@@ -91,7 +92,7 @@ binary:
 |---|---|---|---|
 | burst, no focus step | **9 fields** (0.151 s) | capture + write ceiling | n/a (this is the floor) |
 | focus-bracket, fast zone (≤~44 frames) | **20 fields** (0.34 s) | **lens move + settle** (~11 fields on top of capture) | **no** — physical; no delay constant in `cpapp` |
-| focus-bracket, past the cliff | 36–116 fields | **write pipeline** at buffer-full | not in `cpapp` — pool is in `av-cam.bin` |
+| focus-bracket, past the cliff | 36–116 fields | **write pipeline** at buffer-full | not in `cpapp` — pool is off-processor (presumably `av-cam.bin`, unanalyzed) |
 
 The ~11-field focus-step overhead decomposes (bench-anchored bounds, static-informed
 split) as: lens physical move ~5–8 fields (per-lens, in the lens motor/data), 2–3
@@ -119,9 +120,9 @@ offsets and decompiled evidence:
 - **The write cliff's stall shape** is an SDF develop-resource acquire retry loop —
   `ModuleRcBase::ExecRcAcquire`, file `0x3484F0` / VA `0x4504F0`: the acquire returns
   `0x80` (busy) and the loop retries up to 100 times, posting a wait message each
-  pass. But the **buffer pool behind that acquire chain lives in the cross-processor
-  develop manager (`av-cam.bin`), not `cpapp`** — no image-buffer depth constant
-  surfaced in any `cpapp` sweep.
+  pass. That acquire chain leads to a **cross-processor develop manager** (presumably
+  `av-cam.bin`, not analyzed here), and **no image-buffer depth constant surfaced in any
+  `cpapp` sweep** — so the pool isn't in the binary we have.
 
 ## The one lever we found: the STP buffer-full gate (real, but low-value)
 
@@ -155,13 +156,15 @@ if (DAT_019d22c0 == '\x01') {
 
 > **Cross-processor closure (the "missing replenisher").** Earlier passes noted that
 > this gate only ever *decrements* the counter — the matching replenish was never
-> visible in `cpapp`, so the accounting looked one-sided. That is now resolved: the
+> visible in `cpapp`, so the accounting looked one-sided. The likely reason is that the
 > counter is balanced from the **other processor.** The gate sends into a shared UIPC
 > queue (`0x8F013A`); on the a15 Linux side, `sen.elf`'s log forwarder
 > (`FUN_004021A4`) posts `{type 2, id 0x3D}` into that **same** queue — and `0x8F013A`
-> is in fact referenced on both the cpapp and the a15 sides. The STP pool is a
-> **cross-processor** structure (cpapp ↔ a15), which is exactly why its replenisher is
-> invisible to any `cpapp`-only analysis. (The a15 side is mapped in
+> is referenced on both the cpapp and the a15 sides. So the STP pool looks like a
+> **cross-processor** structure (cpapp ↔ a15), which would explain why the balancing
+> write is invisible to `cpapp`-only analysis. **We did not observe the a15-side write to
+> the counter itself** — this is strong circumstantial evidence, not a located writer.
+> (The a15 side is mapped in
 > [Investigation 2](#investigation-2--other-customization-surfaces).)
 
 **The candidate patch** relaxes the 2× headroom to 1×:
@@ -190,7 +193,7 @@ the shipping `cpapp-b.bin`. See [docs/patch.md](docs/patch.md) for the risk writ
 | focus-step settle constant | — | **does not exist** (zero sleeps in the path) |
 | step-width table shrink | file `0x27D384` | works, but it's the **existing menu setting** by another name (pure geometry — smaller moves, but more frames for the same depth) |
 | VD comm-window margins | file `0x3B5C26`/`0x9EEA46` | ≤4 fields best case, **lens-protocol-timing risk** (slots are lens-defined) |
-| write-cliff buffer depth | — | **not in `cpapp`** — lives in the develop subsystem (`av-cam.bin`), unanalyzed |
+| write-cliff buffer depth | — | **not in `cpapp`** — off-processor in the develop subsystem (presumably `av-cam.bin`), unanalyzed |
 
 ## Practical takeaways (no firmware needed)
 

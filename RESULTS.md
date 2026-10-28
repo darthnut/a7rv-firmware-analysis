@@ -35,9 +35,10 @@ resolution — confirmed fine enough to resolve a 0.3–0.6 s cadence). 1 VD fie
 2. **The slowdown is write-pipeline saturation.** The buffer absorbs ~44 frames at
    full speed; once full, cadence drops to the sustained write/transfer rate and
    stays there. Static RE locates the stall shape (an SDF develop-resource acquire
-   retry loop, `ExecRcAcquire` at VA `0x4504F0`) but shows the buffer pool itself
-   lives in the **develop subsystem (`av-cam.bin`), not `cpapp`** — so this is *not*
-   the STP message gate, and there is no `cpapp`-side depth constant to tune.
+   retry loop, `ExecRcAcquire` at VA `0x4504F0`); the acquire chain leads *off-processor*
+   toward the develop subsystem (presumably `av-cam.bin`, not analyzed here), and there
+   is **no `cpapp`-side depth constant** — so this is *not* the STP message gate, and the
+   governing pool isn't in the binary we have.
 3. **Buffer depth ≈ 44 frames** under these conditions (RAW-L, saving to both).
 4. **The exact slow rate depends on the write path.** Tethered-to-both here is
    ~1.7 s/frame (card write **+** USB transfer). The user's historical card-only
@@ -63,6 +64,17 @@ So "faster when shooting remote" is a **confound, not a real effect** — the te
 doesn't change cadence. The remote stacks just happened to be short (fast zone); the
 slow memories were longer stacks that crossed the cliff.
 
+## An unreconciled loose end (old 26 vs new 20 fields)
+
+Earlier card-only data (a ~305-frame set) put the *fast* zone at **26 fields (0.43 s)**;
+this bench puts it at **20 fields (0.34 s)**, flash on and off. The old *slow* cadence
+maps cleanly onto the post-cliff rate, but the old *fast* zone (26) and the new one (20)
+are **not reconciled.** Candidate explanations, none yet confirmed: a **firmware
+version** difference (this bench is on 4.00 — the old data may predate it), a different
+**save path**, or a different **focus-step width / lens**. Flagging it rather than
+papering over it — [TESTING.md](TESTING.md) is still written around the old 26/36
+figures, while the numbers here are what firmware 4.00 actually produced.
+
 ## Firmware relevance (revised — honest)
 
 Two regimes, two different limiters:
@@ -72,11 +84,12 @@ Two regimes, two different limiters:
   2-byte buffer patch does **nothing** here. Real levers for short stacks are
   non-firmware: a **smaller focus-step width**, or a **faster-focusing lens**.
 - **Long stacks (> ~44 frames)** — paced by the **write pipeline** at the buffer
-  cliff. Static RE places the controlling buffer pool in the **develop subsystem
-  (`av-cam.bin`), not `cpapp`** — reached through the SDF acquire retry loop
-  (`ExecRcAcquire`, VA `0x4504F0`), *distinct* from the STP message gate at
-  `0x4196B4`. So no `cpapp` patch — including the 2-byte STP relaxation — addresses
-  this cliff; the pool that governs it isn't in the binary we analyzed.
+  cliff. The SDF acquire retry loop (`ExecRcAcquire`, VA `0x4504F0`) is the stall shape,
+  and its acquire chain leads *off-processor* toward the develop subsystem (presumably
+  `av-cam.bin`, not analyzed here) — *distinct* from the STP message gate at `0x4196B4`,
+  and with **no depth constant in `cpapp`**. So no `cpapp` patch — including the 2-byte
+  STP relaxation — addresses this cliff; the pool that governs it isn't in the binary we
+  analyzed.
 
 **Bottom line:** for the short stacks typically shot, cadence is
 focus-mechanism-bound (lens move + settle, no camera-firmware timer). For long
