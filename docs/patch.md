@@ -40,7 +40,11 @@ one message.
   demonstrated path from "more trace-message headroom" to "fewer VD fields per
   captured frame."
 - The 2× headroom is most likely a guard against a replenisher-lag accounting race.
-  The replenisher was never located, so we cannot show the slack is unnecessary.
+  The replenisher is now located — it is **on the other processor** (the a15, via the
+  shared UIPC queue `0x8F013A`; see Investigation 1's "cross-processor closure"). Since
+  the pool is balanced across a processor boundary, the timing of that replenish — and
+  therefore whether the 2× slack is actually unnecessary — still can't be shown from
+  static `cpapp` analysis alone.
 - The +10-field slowdown has not been tied to this gate by any trace or measurement.
 
 ## Why the damage risk looks low (but is not zero)

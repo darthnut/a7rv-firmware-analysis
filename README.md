@@ -150,6 +150,17 @@ if (DAT_019d22c0 == '\x01') {
   **~16 KB request-*message* staging pool, not image data** — it literally logs
   `[STP_ERROR]: BUFFER FULL!!!` and latches trace off when full.
 
+> **Cross-processor closure (the "missing replenisher").** Earlier passes noted that
+> this gate only ever *decrements* the counter — the matching replenish was never
+> visible in `cpapp`, so the accounting looked one-sided. That is now resolved: the
+> counter is balanced from the **other processor.** The gate sends into a shared UIPC
+> queue (`0x8F013A`); on the a15 Linux side, `sen.elf`'s log forwarder
+> (`FUN_004021A4`) posts `{type 2, id 0x3D}` into that **same** queue — and `0x8F013A`
+> is in fact referenced on both the cpapp and the a15 sides. The STP pool is a
+> **cross-processor** structure (cpapp ↔ a15), which is exactly why its replenisher is
+> invisible to any `cpapp`-only analysis. (The a15 side is mapped in
+> [Investigation 2](#investigation-2--other-customization-surfaces).)
+
 **The candidate patch** relaxes the 2× headroom to 1×:
 
 | file offset | before | after | instruction change |
@@ -215,16 +226,20 @@ Five surfaces surveyed in `cpapp-b.bin` and the a15 Linux partition. The most
 interesting is a **dormant factory service stack**; the rest are reference material or
 dead ends.
 
-- **Dormant SSH / service stack (a15).** The camera ships, unused, a full SSH service
-  — `sbin/sshd`, a host-key generator, and `libInfraSSHManager.so`
-  (`network::InfraSshManager`). The boot chain is mapped: `bin/im.elf` (power/boot
-  manager, `C3P_PACKET` inter-process protocol) → `bin/sen.elf` (SENSER core v1.3.4,
-  reads a numeric "smode" from a cascade of `/boot`, `/setting`, `/var` paths) →
-  service stack. **The gate is a factory service token** (a HASP check at
-  `/setting/.hasp`) plus the right smode: SSH is provisioned only when Sony's factory
-  tool connects. *Feasibility: medium-hard — it would mean defeating the token check,
-  i.e. a focused reverse-engineering project on its own, not a setting or a flag flip.
-  Documented as a surface, not attempted.*
+- **Dormant SSH / service stack (a15) — authentication now decoded.** The camera
+  ships, unused, a full SSH service — `sbin/sshd`, a host-key generator, and
+  `libInfraSSHManager.so` (`network::InfraSshManager`). The boot chain is mapped:
+  `bin/im.elf` (power/boot manager, `C3P_PACKET` inter-process protocol) →
+  `bin/sen.elf` (SENSER core v1.3.4, reads a numeric "smode" from a cascade of
+  `/boot`, `/setting`, `/var` paths) → service stack. The factory service-mode gate is
+  mapped end to end: a numeric "smode", a USB command channel, and a **three-level
+  SHA-256 challenge-response** whose keys are **static 512-byte secrets embedded in a
+  shipped library**; completing it lets the connected tool provision the `sshd` login.
+  Full chain, offsets, and the security implication are in
+  [the subsection below](#the-service-mode-authentication-decoded). *The earlier
+  "HASP token" framing was wrong — `/setting/.hasp` is a session audit log, not the
+  gate. This is a mapped weakness, not a packaged exploit, and the key bytes are
+  deliberately not reproduced.*
 - **Command-dispatcher catalog — 288 commands mapped.** Every internal
   `SET_` / `PID_SET_` / `PUSH_` command was paired with its handler offset and log
   string (e.g. imager-mode, power-save, and drive commands). This is a reference for
@@ -248,13 +263,89 @@ dead ends.
   register-dump format, not a global debug switch.
 
 **Bottom line.** The one surface with real leverage (SSH / service access, which would
-also unlock the `ImagerSeqLog` diagnostics) sits behind a factory-tool token, not a
-config flag. It's a legitimate future RE target but a substantial one, and it is only
-mapped here — not defeated.
+also unlock the `ImagerSeqLog` diagnostics) is gated by a factory-tool
+challenge-response, not a config flag — and that gate is now fully mapped (below). Its
+entire strength rests on three static keys baked into a shipped library, so it is "only
+as secret as the firmware encryption." No working unlock was performed on hardware;
+this is a static map of the mechanism.
 
----
+## The service-mode authentication, decoded
 
-# Investigation 3 — a7R VI firmware (blocked)
+All offsets in this subsection are in the **a15 Linux ELF libraries**
+(`libsencore.so`, `sen.elf`, `libInfraSSHManager.so`), not in `cpapp` — a different
+address space from Investigation 1's load base. Everything here is read-only static
+analysis (Ghidra, symbols from `.dynsym`). **The actual key bytes are not reproduced**
+— only their offsets and the verification mechanism, consistent with this repo's
+no-redistribution line.
+
+**1. Service mode (`smode`).** `sen.elf` persists a one-byte mode in a `/boot` →
+`/setting` → `/var/.sen/.smode` cascade. `FUN_004028D0` matches it against a
+one-entry string table (`key 1 → "UU"`): on a match it writes the literal string
+`"UU"` into the smode file (service mode ON); anything else removes the file (OFF).
+Startup mirrors the byte to `/var/.sen/.smode` and logs `SENSER_MODE = %d`.
+
+**2. The USB service channel.** `SenserIfStart` → `Usb::open_channel()` →
+`InitiationDispatcher::register_handler()` brings up an event-driven USB command
+channel (`CORE_START MODE:SENSER`). The protocol worker is `NinThread`
+(`libsencore.so` @ `0x10BBFC`), framing fixed `0x204`-byte packets dispatched by
+`CmdDecode`.
+
+**3. The three-level challenge-response ladder.** `CmdDecode` command ids:
+
+| cmd | verb | effect |
+|---|---|---|
+| 1 | `HOP` (`xxhop`) | hello / handshake start |
+| 3 | `STEP` (`xxstep`) → `JUMP` | **challenge-response**; on success `level++` (1→2→3, wraps) |
+| 5 / 7 | `KICK` (`xxkick`) | authenticated command executor; then `tlog_set_hasp(id)` |
+| — | unknown | `NIN_THREAD_ERR_UNKNOWN_CMD` |
+
+`xxstep` (`libsencore.so` @ `0x115C1C`) verifies `SHA256(challenge[512] ‖ key[512])`
+by `memcmp` against the tool's response. There is **one 512-byte static key per
+level**, embedded in `libsencore.so`:
+
+| level | key offset (`libsencore.so`) |
+|---|---|
+| 1 | `0x1570D8` |
+| 2 | `0x156ED8` |
+| 3 | `0x156CD8` |
+
+On reaching **level 3** the service creates `/ramdsk/dev` and writes `"AA\0"` to
+`/ramdsk/dev/mode` — a live-session marker other subsystems honour (a candidate
+trigger for the `av-cam` `debug=1` paths, and so plausibly for `ImagerSeqLog`). It is
+removed on session end. `xxstep2` (`0x116058`) is a parallel re-auth variant for cmd
+ids 9/10.
+
+**4. From authenticated session to SSH.** Once the ladder is cleared, the service
+command set includes `network::InfraSshManager::PasswordManagerImpl::updatePasswordFile`
+(`libInfraSSHManager.so` @ `0x108318`), which writes `name + sep + password` (len
+< 0x65) under `flock` to `/tmp_network/ssh/ssh_name_password`. In other words, **the
+party that completes the handshake sets the `sshd` login** — this is how the factory
+tool enables SSH.
+
+**5. `/setting/.hasp` is an audit log, not a gate** (correcting the Investigation 2
+TL;DR's earlier framing). It is an 88-byte, 10-entry ring of
+`{u16 tool-id, 6-byte BCD timestamp}`; `Regist_HaspId` appends the current session and
+**returns success when the file is absent**. "Hasp last_histroy data error" means a
+corrupt log, not an auth failure. It records *who connected*, it does not decide
+*whether* they may.
+
+**6. Related service surface.** Beyond USB there is an **adjustment-command channel**
+with no USB needed: `sens_adjCmd_init` registers an OSAL UIPC callback on queue
+`0x3D025F` → dispatcher `FUN_00112630`. Named verbs there include `cmd 0x14`
+(mode-file ops on `/mode` ↔ `/tmode`) and **log extraction** (op 4:
+`/log/ulogio_klog.txt`, `/log/ulogio_tlog.txt`, `/log/escapelog.bin`), alongside
+factory sensor-adjustment handlers that pair with `a15/bin/adjstctl.elf`. The real
+post-auth verb table, however, is **runtime-registered** (a `PacketData` factory
+vector at `DAT_0016CA08`), so the individual command ids are **not statically
+enumerable** without execution.
+
+**Security finding.** The factory-tool authentication is a set of **hardcoded,
+shared, static secrets shipped inside the firmware** — not per-device key material and
+not a hardware dongle. Its confidentiality rests entirely on the assumption that "the
+firmware is encrypted," which is the very assumption this class of project (community
+RE of Sony updater crypto) already defeats. The access vector is **physical USB to the
+camera**, and nothing here has been exercised on hardware; it is documented as a
+mapped design weakness.
 
 **The question:** can the same approach read the newer a7R VI body firmware?
 
