@@ -24,6 +24,9 @@ derived analysis.
   patch we found.
 - **[TESTING.md](TESTING.md)** / **[RESULTS.md](RESULTS.md)** — empirical protocols
   and their measured results, because the binary only tells half the story.
+- **[Acknowledgments & prior work](#acknowledgments--prior-work)** — this project did
+  **not** crack the firmware encryption; it builds on community work that did, credited
+  there.
 
 ---
 
@@ -434,6 +437,42 @@ Reading it would require the a7R VI generation's updater keys (the kind of thing
 historically comes from community RE of the updater), or a flash dump taken off the
 body directly. Until then, **nothing about a7R VI features can be asserted from this
 file** — anything claimed would be speculation, and is deliberately not recorded here.
+
+---
+
+## Acknowledgments & prior work
+
+**This project did not break the firmware encryption.** Being able to read the a7R V
+firmware at all rests entirely on earlier community reverse-engineering, which this
+project only *applied* — a small script lifts their published keys and container layout
+and runs them on a package you supply; it derives nothing cryptographic. Credit for
+getting inside Sony's Gen5 (CXD9005x / BIONZ XR) firmware belongs to:
+
+- **[q19032/Sony-firmware-unpacker](https://github.com/q19032/Sony-firmware-unpacker)**
+  — firmware **decryption and key derivation** (the update-package crypto: the `FF03`
+  memory read on the CXD9005x and the `SHA256(…)` key formula). This is the work that
+  makes the package readable.
+- **[David Buchanan — `ILCE-7M4-RE`](https://github.com/DavidBuchanan314/ILCE-7M4-RE)**
+  (and [`Sony-ILCE-7M4-Linux`](https://github.com/DavidBuchanan314/Sony-ILCE-7M4-Linux))
+  — the foundational boot-ROM / serial-boot / eMMC reverse engineering on the CXD90057
+  generation: getting code running low enough to pull secrets off the silicon. The hard
+  part.
+- **[ma1co — `fwtool.py`](https://github.com/ma1co/fwtool.py)** and
+  **[`Sony-PMCA-RE`](https://github.com/ma1co/Sony-PMCA-RE)** — the firmware **container
+  format / unpacking** and the Sony camera **service protocol** (the SENSER system
+  Investigation 2 re-derives and credits in full above).
+- **[Erlla — `sony-a7m4-custom-firmware`](https://github.com/Erlla/sony-a7m4-custom-firmware)**
+  — brought the above together into working A7 IV custom-firmware tooling.
+- **[Hearts-Ace — `sony-a7r5-custom-firmware`](https://github.com/Hearts-Ace/sony-a7r5-custom-firmware)**
+  — carried the scheme to the a7R V (ILCE-7RM5) and confirmed the a7 IV keys and
+  container apply unchanged — which is why the Ver. 4.00 package here decrypts with the
+  a7 IV constants.
+
+One precise point, because it bounds what any of this makes possible: the keys above
+decrypt the **update package** (the FDAT layer), which is a *different* key system from
+the **eMMC AES-XTS** encryption on the camera itself. "We can read the firmware" and
+"we can flash a modified one onto a body" rest on different pieces of the upstream work,
+and **only reading is settled** — this project stays on the reading side.
 
 ---
 
