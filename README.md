@@ -470,10 +470,14 @@ Two results:
   the `0x0` read both failed. As driven with the default selectors, the verb exposes **no
   memory** on a7R V fw 4.00.
 
-  This is architecturally consistent with the two-processor split: SENSER runs on the **a15
-  (Linux) processor**, while `cpapp` runs on the **separate main core**, so an a15-side dump
-  verb has no line of sight to `cpapp` virtual addresses. Reading `cpapp` memory live would
-  have to bridge through the a15 (its debug terminal → `/proc/iomem` / `devmem`) — and
+  *Why* it refuses isn't settled from this alone. Dispatch here is runtime-registered —
+  handlers self-register and there's no static `0xff03` handler in the a15 exports — so the
+  verb may simply be **unregistered** on this body, or permission-gated. It is also
+  **consistent with** the two-processor split (SENSER on the **a15 / Linux** core, `cpapp` on
+  the **separate main core**), under which an a15-side dump verb would have no line of sight
+  to `cpapp` addresses at all — but that is a plausible reading, **not proven here**. Either
+  way, reading `cpapp` memory live would have to bridge through the a15 (its debug terminal →
+  `/proc/iomem` / `devmem`), which would also settle the address-visibility question — and
   **enabling that terminal is itself a write** (the shell flags `term` as a write op), so it
   was out of scope for an observe-only run.
 
