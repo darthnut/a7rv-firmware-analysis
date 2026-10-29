@@ -278,8 +278,11 @@ dead ends.
 also unlock the `ImagerSeqLog` diagnostics) is gated by a factory-tool
 challenge-response, not a config flag — and that gate is now fully mapped (below). Its
 entire strength rests on three static keys baked into a shipped library, so it is "only
-as secret as the firmware encryption." No working unlock was performed on hardware;
-this is a static map of the mechanism.
+as secret as the firmware encryption." A first **observe-only** hardware session has since
+completed this challenge-response on an owned body — the decode works live, no writes
+issued — and found the raw memory-dump verb locked (`0x80`); see
+[First hardware session](#first-hardware-session-the-gate-completes-the-dump-verb-is-locked-observe-only)
+below.
 
 ## The service-mode authentication, decoded
 
@@ -419,9 +422,14 @@ deliberately left as a direction, not a tool.
 that completes the handshake and reads responses back — and that client already exists:
 `ma1co`'s [Sony-PMCA-RE](https://github.com/ma1co/Sony-PMCA-RE) is a public, working
 implementation of this exact SENSER system, which (per the credit note above) the a7R V
-reuses with the same keys. This repo doesn't duplicate it. Extending it to the a7R V
-would be ordinary device-support work plus **verification on real hardware, which has
-not been done here** — the local tooling has only passed an offline selftest. (Emulation
+reuses with the same keys. This repo doesn't duplicate it. That extension
+already exists — [`masterflai/pmca-re-reloaded`](https://github.com/masterflai/pmca-re-reloaded)
+ports the SENSER system with USB transport, Windows drivers and a service shell — and a
+first **observe-only** session on an owned a7R V has now been run with it (see
+[First hardware session](#first-hardware-session-the-gate-completes-the-dump-verb-is-locked-observe-only)):
+the extracted keys authenticate and the channel is live, though the raw memory-dump verb
+came back locked. This project's own `senproto.py` stays a reference codec that has only
+passed an offline selftest. (Emulation
 was assessed as a safer verifier — `ma1co`'s OpenMemories-QEMU — but it models older
 Sony SoCs; bringing up the a7R V's CXD90057 / BIONZ XR would be a substantial project of
 its own, so hardware remains the only practical check.)
@@ -438,11 +446,46 @@ The real caution is **not** secrecy — the keys and protocol are public — but
   before issuing anything that writes), and only ever on **a camera you own and are
   prepared to lose**.
 
+## First hardware session: the gate completes, the dump verb is locked (observe-only)
+
+Everything above was static analysis plus an offline self-test. A first **observe-only**
+session has since been run on an **owned** a7R V (ILCE-7RM5, firmware 4.00) using
+[`masterflai/pmca-re-reloaded`](https://github.com/masterflai/pmca-re-reloaded) — a
+maintained Rust port of `ma1co`'s `Sony-PMCA-RE` with USB transport, Windows drivers and a
+service shell. **No writes were issued**, and the camera was verified healthy afterward.
+Two results:
+
+- **The decoded gate completes on real hardware.** The three 512-byte SHA-256 keys lifted
+  from this body's own `libsencore.so` authenticate: the handshake runs in **SHA-256 mode**
+  (`HOP` → `STEP`×3 → `KICK`) and reaches the service prompt. That promotes the auth decode
+  above from a static map to behaviour **confirmed on a live body** — observe-only, nothing
+  written. Read-only identity/backup verbs (`info`, the 88-byte `HASP` audit block, the
+  settings-backup image) returned valid data, confirming the channel is live. Device-specific
+  contents are **not** reproduced here.
+- **The raw memory-dump verb is locked on this body.** The SENSER *MemoryDump* verb
+  (`pFunc 0xff03`; flat `{u32 base, u32 size}` payload, packet-header micon/offset selectors
+  `0`) returned camera result code **`0x80`** for **every** address tried — `0x0`, and the
+  `cpapp` VAs `0x108000` / `0x385598` / `0x115E994` — at sizes `0x10` through `0x200`
+  (aligned). It is **not** a size/alignment artifact: the `0x200`-aligned `0x108000` read and
+  the `0x0` read both failed. As driven with the default selectors, the verb exposes **no
+  memory** on a7R V fw 4.00.
+
+  This is architecturally consistent with the two-processor split: SENSER runs on the **a15
+  (Linux) processor**, while `cpapp` runs on the **separate main core**, so an a15-side dump
+  verb has no line of sight to `cpapp` virtual addresses. Reading `cpapp` memory live would
+  have to bridge through the a15 (its debug terminal → `/proc/iomem` / `devmem`) — and
+  **enabling that terminal is itself a write** (the shell flags `term` as a write op), so it
+  was out of scope for an observe-only run.
+
+Scope caveat: one body, one firmware, default packet selectors. A non-zero micon/offset
+selector, or a different firmware, could behave differently; this records what fw 4.00
+returned, read-only.
+
 ## What's actually new for the a7R V
 
 Setting aside everything `ma1co` already published, the genuinely a7R V-specific
-findings here are modest — and **anything touching the live device is unverified** (no
-hardware test):
+findings here are modest — and **anything touching the live device is unverified beyond
+the one observe-only session above** (no writes; a single body / firmware):
 
 - **The SENSER keys are unrotated into Gen5 / BIONZ XR.** The a7R V (ILCE-7RM5) takes
   the same `senserKeysSha256` values as earlier bodies — a confirmation that Sony never
@@ -521,6 +564,10 @@ getting inside Sony's Gen5 (CXD9005x / BIONZ XR) firmware belongs to:
   **[`Sony-PMCA-RE`](https://github.com/ma1co/Sony-PMCA-RE)** — the firmware **container
   format / unpacking** and the Sony camera **service protocol** (the SENSER system
   Investigation 2 re-derives and credits in full above).
+- **[masterflai — `pmca-re-reloaded`](https://github.com/masterflai/pmca-re-reloaded)** —
+  a maintained Rust port of `ma1co`'s `Sony-PMCA-RE` (USB transport, Windows drivers, a
+  tested service shell). The first observe-only hardware session in Investigation 2 was
+  run with it.
 - **[Erlla — `sony-a7m4-custom-firmware`](https://github.com/Erlla/sony-a7m4-custom-firmware)**
   — brought the above together into working A7 IV custom-firmware tooling.
 - **[Hearts-Ace — `sony-a7r5-custom-firmware`](https://github.com/Hearts-Ace/sony-a7r5-custom-firmware)**
@@ -546,6 +593,9 @@ and **only reading is settled** — this project stays on the reading side.
   verifier.
 - Empirical cadence measured from each frame's EXIF `DateTimeOriginal` +
   `SubSecTimeOriginal`, segmented into stacks by time gap and reported in VD fields.
+- AI assistance: much of the firmware digging was done with **GLM-5.3**; every finding
+  was verified against the binary (and, where stated, against the hardware) before it was
+  recorded here.
 - See [docs/method.md](docs/method.md) for detail.
 
 ## Legal & safety
@@ -553,7 +603,8 @@ and **only reading is settled** — this project stays on the reading side.
 - This is reverse engineering of **my own camera**, for interoperability and
   understanding. **No Sony firmware is redistributed here** — only byte offsets and
   derived analysis.
-- Nothing here is validated on hardware. Modifying and flashing camera firmware can
+- Apart from the one **observe-only** service-mode session in Investigation 2 (no writes),
+  nothing here is validated on hardware. Modifying and flashing camera firmware can
   **permanently brick** the device and will void any warranty. If you act on this,
   do it only on a body you are prepared to lose, and only after an empirical test
   gives a reason to.
