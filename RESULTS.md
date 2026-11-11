@@ -62,6 +62,10 @@ run. Focus Bracket's fast zone is **20 fields (0.34 s)**. The gap —
 settling between shots. In the fast zone that overhead, *not* the write path, is the
 dominant cost, and it is **identical tethered vs untethered** (both 20 fields).
 
+The static decode (see README, *The frame cycle, end to end*) now splits those ~11
+fields precisely: **1 field** compute+send, **~6 fields** lens travel (lens- and
+width-dependent), **4 fields** hard-coded settle (file `0x27D4B4`), with the move cycle
+running strictly serially before the same 9-field imaging segment a burst frame costs.
 So "faster when shooting remote" is a **confound, not a real effect** — the tether
 doesn't change cadence. The remote stacks just happened to be short (fast zone); the
 slow memories were longer stacks that crossed the cliff.
@@ -88,10 +92,14 @@ written around the old 26/36 figures; the numbers here are what firmware 4.00 pr
 
 Two regimes, two different limiters:
 
-- **Short stacks (≤ ~44 frames)** — paced by **focus-step overhead** (~0.19 s/frame).
-  That lives in the **AF / lens-drive control**, *not* the STP buffer gate, so the
-  2-byte buffer patch does **nothing** here. Real levers for short stacks are
-  non-firmware: a **smaller focus-step width**, or a **faster-focusing lens**.
+- **Short stacks (≤ ~44 frames)** — paced by **focus-step overhead** (~0.19 s/frame):
+  1 field send + ~6 lens travel + 4 settle, serially before the 9-field imaging
+  segment. That lives in the **AF / lens-drive control**, *not* the STP buffer gate, so
+  the 2-byte buffer patch does **nothing** here. The settle constant (file `0x27D4B4`)
+  is now located and one-byte-patchable, but trimming it buys ≤2–3 fields and risks
+  window-check retries/soft frames — small reward, real risk. Real levers for short
+  stacks are non-firmware: a **smaller focus-step width**, or a **faster-focusing
+  lens**.
 - **Long stacks (> ~44 frames)** — paced by the **write pipeline** at the buffer
   cliff. The SDF acquire retry loop (`ExecRcAcquire`) traces into **`av-cam.bin`** (the
   develop subsystem, now analyzed): its resource server and `CdMemMgr` manage the pool,

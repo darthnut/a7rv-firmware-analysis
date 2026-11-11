@@ -1,0 +1,115 @@
+{
+  "$comment": "Focus-bracket frame cycle — one frame, static decode + bench anchor. Derived from cpapp-b.bin fw 4.00 (Inv. 1). Offsets are file offsets; VA = file + 0x108000. Constants byte-verified. Durations in VD fields (1 field = 16.6833 ms) except stage 0 which is in-stage (no field cost).",
+  "field_ms": 16.6833,
+  "burst_reference_fields": 9,
+  "burst_reference_ms": 151.0,
+  "bracket_fast_zone_fields": 20,
+  "bracket_fast_zone_ms": 334.0,
+  "stages": [
+    {
+      "id": 0,
+      "name": "Frame kick",
+      "duration_fields": 0,
+      "duration_ms": 0,
+      "duration_type": "in-stage",
+      "entry": "Previous frame's readout done; still-execute pipeline enters capture-init stage (Stg>CapInit / Stg>CapInitLv)",
+      "exit": "Bracket request written, kick flag set, event emitted (handler sets RAM 0x0158829A)",
+      "driver": "body (stage scheduler)",
+      "code": {
+        "stage_containers": [
+          {"name": "Stg>CapInit", "function_file": "0x36EBDC", "function_va": "0x47EBDC", "call_site_va": "0x47EED2", "trigger_caller_function_va": "0x48D6D4"},
+          {"name": "Stg>CapInitLv", "function_file": "0x363BD8", "function_va": "0x473BD8", "call_site_va": "0x473E52", "trigger_caller_function_va": "0x48D7A0"}
+        ],
+        "trigger": {"file": "0x85BA62", "va": "0x963A62"},
+        "request_setter": {"file": "0x8594A8", "va": "0x9614A8"},
+        "kick_setter": {"file": "0x859504", "va": "0x961504"},
+        "event_emitter": {"file": "0x8E187E", "va": "0x9E987E"},
+        "event_handler_sets_flag": {"file": "0x89914A", "va": "0x9A814A", "flag_byte": "0x0158829A"}
+      }
+    },
+    {
+      "id": 1,
+      "name": "FSM state 0 — compute target + send MOVE_FC_A",
+      "duration_fields": 1,
+      "duration_ms": 16.6833,
+      "duration_type": "body constant (one poll tick)",
+      "entry": "Kick consumed; lens context present; lens idle/ready",
+      "exit": "MOVE_FC_A (cmd 0x43) queued to lens; FSM -> state 1",
+      "driver": "body",
+      "detail": "target = clamp(start_pos +/- (step_table[idx] * (lens_ctx[0xE]>>1)) >> 6); step_table at file 0x27D384 = {32,42,53,64,74,85,96,106,117,128}; drive profile fixed 0; first move of sequence sets sequence-start bit",
+      "code": {
+        "fsm_body": {"file": "0x27D398", "va": "0x385398"},
+        "target_calc": {"file": "0x27D2F0", "va": "0x3852F0"},
+        "step_table": {"file": "0x27D384", "va": "0x385384"},
+        "send_chain": ["0x91603E", "0x928A86", "0x2C37E4 (BL_MOVE_FC_A trace)"]
+      }
+    },
+    {
+      "id": 2,
+      "name": "FSM state 1 — lens travel wait",
+      "duration_fields": 6,
+      "duration_ms": 100.1,
+      "duration_type": "lens physics (bench-derived residual; lens- and step-width-dependent)",
+      "duration_bounds_fields": [1, 60],
+      "entry": "Move command sent",
+      "exit": "All four move-done sub-checks pass (or 60-field abort cap -> state 4)",
+      "driver": "lens (travel time) + body (poll cadence)",
+      "detail": "polled once per VD field via camera-generic move-done gate: !0x019CC125 AND cmd-0x1D completion bit (7x0xC table at RAM 0x01109114, byte +5) AND cmd-0x43 move-state (else encoder convergence within +/-126 units) AND 0x019CC126==0. Same gate the AF path uses.",
+      "code": {
+        "poll": {"file": "0x9160FA", "va": "0xA1E0FA"},
+        "timeout_cmp": {"file": "0x27D48C", "va": "0x38548C", "bytes": "3c 28", "immediate": "0x3C = 60 fields"}
+      }
+    },
+    {
+      "id": 3,
+      "name": "FSM state 2 — fixed settle + focus-window validation",
+      "duration_fields": 4,
+      "duration_ms": 66.7,
+      "duration_type": "body constant (hard poll counter)",
+      "entry": "Move-done reported",
+      "exit": "Settle counter hits 4, then lens position validated inside requested window (else retry <=12 attempts, then abort -> state 4)",
+      "driver": "body",
+      "detail": "THE camera-side time constant. One-byte patchable (cmp r0,#4 -> cmp r0,#N). Trimming risks window-check retries and soft frames; buys <=2-3 fields.",
+      "code": {
+        "settle_cmp": {"file": "0x27D4B4", "va": "0x3854B4", "bytes": "04 28", "immediate": "4 fields"},
+        "window_retry_cap": {"file": "0x27D55A", "va": "0x38555A", "bytes": "0b 28", "immediate": "0xB (=12 attempts)"}
+      }
+    },
+    {
+      "id": 4,
+      "name": "FSM state 3 — parked; exposure + readout",
+      "duration_fields": 9,
+      "duration_ms": 151.0,
+      "duration_type": "imaging pipeline (equals burst frame cost; bench-anchored)",
+      "entry": "FSM parks in state 3 (move done, settled, window validated)",
+      "exit": "Exposure + readout complete; stage pipeline advances to next frame's capture-init",
+      "driver": "body (imaging)",
+      "detail": "FSM state-3 body is empty; the exposure arms on the EC_ExpWait/SetupCap path (kick was issued at frame start). Next kick arrives from next frame's capture-init.",
+      "code": {
+        "fsm_case3": "empty body in fsm_body 0x27D398"
+      }
+    }
+  ],
+  "totals": {
+    "body_fixed_fields_min": 6,
+    "note_body_fixed": "1 (send) + 1 (state-1 min poll) + 4 (settle) — even an instant lens could not beat ~15 fields/frame for this drive profile",
+    "measured_total_fields": 20,
+    "serialization": "fully serial; move cycle (states 0-2, ~11 fields) strictly precedes imaging (state 3, ~9 fields); kick issued from next frame's capture-init; no overlap path exists in the code"
+  },
+  "comparison_burst": {
+    "fields": 9,
+    "difference_fields": 11,
+    "difference_ms": 183.5,
+    "difference_attribution": [
+      {"name": "compute + send", "fields": 1},
+      {"name": "lens travel (bench lens, default width)", "fields": 6},
+      {"name": "hard settle", "fields": 4}
+    ]
+  },
+  "sources": [
+    "README.md — Investigation 1, 'The frame cycle, end to end'",
+    "notes/glm-lens-timing.md (D:/a7rv-fw) — full static decode with READ/INFERRED labels",
+    "work/ghidra_export/trigger_trace/ — decompiles of trigger, callers, stage containers, move family",
+    "RESULTS.md — bench cadence measurements (fw 4.00)"
+  ]
+}

@@ -38,9 +38,12 @@ or a firmware lever worth pursuing?
 
 > **Status — settled.** Two independent lines of evidence now converge: a controlled
 > bench test (cadence measured from EXIF capture timestamps, [RESULTS.md](RESULTS.md))
-> and a complete static reverse-engineering sweep of `cpapp-b.bin`. **Neither the
-> fast-zone cadence nor the slowdown is a tunable camera-firmware constant.** The one
-> patch we found is real but low-value. The honest answer is below.
+> and a complete static reverse-engineering sweep of `cpapp-b.bin` — since extended
+> with a follow-on decode that traced the frame trigger's dispatch sites and located
+> the one camera-side settle constant. **Neither the fast-zone cadence nor the
+> slowdown is meaningfully tunable in camera firmware** (the one located constant buys
+> ≤2–3 fields at real risk; the write cliff has no patchable depth). The honest answer
+> is below.
 
 ## TL;DR
 
@@ -50,12 +53,14 @@ camera-firmware timer:**
 - **Short stacks (≤ ~44 frames): paced by focus-step overhead.** A fastest-burst
   reference (no focus stepping) runs ~**9 VD fields** (0.151 s ≈ 6.6 fps) — the
   capture+write ceiling. Focus Bracket's fast zone runs ~**20 fields** (0.34 s). The
-  gap, **~11 fields (~0.19 s) per frame, is the lens physically moving and settling
-  between shots** — identical tethered vs untethered, flash on vs off. Static RE
-  confirms this is **not a firmware delay**: the "Focus Step Width" menu loads a move
-  *distance*, not a timer, and there is **not a single kernel-sleep call in the entire
-  ~1,300-function focus-bracket sequencer.** The settle lives in the lens (MCU /
-  lens-file data), not in `cpapp`.
+  gap, **~11 fields (~0.19 s) per frame, is one serial lens-move cycle the bracket FSM
+  inserts between exposures** — identical tethered vs untethered, flash on vs off. The
+  follow-up decode settles the mechanism precisely (see
+  [*The frame cycle, end to end*](#the-frame-cycle-end-to-end-settling-glms-open-questions)):
+  1 field to compute+send the move, ~6 fields of physical lens travel (polled), a
+  hard-coded **4-field settle** (file `0x27D4B4` — now *located*, correcting the earlier
+  "no settle constant exists" claim), then the unchanged 9-field imaging segment. The
+  bulk is lens physics; the settle is the one camera-side constant.
 - **Long stacks (> ~44 frames): paced by the write-pipeline cliff.** The buffer
   absorbs ~44 frames at full speed, then cadence collapses to the sustained
   write/transfer rate. The stall is an SDF develop-resource acquire retry loop whose
@@ -92,15 +97,14 @@ binary:
 | regime | cadence | what limits it | firmware lever? |
 |---|---|---|---|
 | burst, no focus step | **9 fields** (0.151 s) | capture + write ceiling | n/a (this is the floor) |
-| focus-bracket, fast zone (≤~44 frames) | **20 fields** (0.34 s) | **lens move + settle** (~11 fields on top of capture) | **no** — physical; no delay constant in `cpapp` |
+| focus-bracket, fast zone (≤~44 frames) | **20 fields** (0.34 s) | **serial lens-move cycle** (~11 fields: 1 send + ~6 travel + 4 settle) on top of capture | settle constant exists (`0x27D4B4`) but buys ≤2–3 fields at real risk; travel is lens physics |
 | focus-bracket, past the cliff | 36–116 fields | **write pipeline** at buffer-full | in `av-cam.bin` (develop subsystem) — runtime-configured, **no static constant** |
 
-The ~11-field focus-step overhead decomposes (bench-anchored bounds, static-informed
-split) as: lens physical move ~5–8 fields (per-lens, in the lens motor/data), 2–3
-VD-quantized comm hops where **the send/reply slots are reported by the lens**, and
-≤4 fields of camera-side margin guards. The only part that lives in the camera and is
-even arguably tunable is those ≤4 fields of margin — and they're lens-protocol-timing
-risky (see the lever table).
+The ~11-field focus-step overhead decomposes (superseding the earlier bounds guess)
+as: **1 field** to compute+send the move, **~6 fields** of lens physical travel
+(lens- and width-dependent), and **4 fields of hard-coded camera-side settle** —
+event hops contribute ~0 (GetSendTiming's window is µs-scale, not field-scale). The
+only camera-side time constants in the path: that settle and the 60-field abort cap.
 
 ## Static analysis — what is, and isn't, in `cpapp`
 
@@ -116,8 +120,12 @@ offsets and decompiled evidence:
   "Focus Step Width" selects where on this ramp a run operates — so a larger width is
   a **larger physical move per frame, not a longer delay.**
 - **Zero kernel-sleep calls** (the `FUN_005CAAFC` sleep primitive) exist anywhere in
-  the decompiled sequencer set. There is **no camera-side settle/delay constant** in
-  the focus path to trim. This is the decisive negative for the short-stack regime.
+  the decompiled sequencer set — the *bracket* overhead is not a sleep-based delay. But
+  the follow-up decode (below) **did locate one hard-coded camera-side wait**: a fixed
+  **4-field settle** in the bracket FSM (state 2), byte-verified at file `0x27D4B4`
+  (`cmp r0,#4`, bytes `04 28`). The earlier "no settle constant exists" claim is
+  superseded: there is no *sleep-based* delay, but there *is* a poll-count settle.
+  Details in the frame-cycle subsection below.
 - **The write cliff's stall shape** is an SDF develop-resource acquire retry loop —
   `ModuleRcBase::ExecRcAcquire`, file `0x3484F0` / VA `0x4504F0`: the acquire returns
   `0x80` (busy) and the loop retries up to 100 times. That chain now **traces fully into
@@ -127,6 +135,42 @@ offsets and decompiled evidence:
   behind them (`CdMemMgr`) is **configured at runtime** (`SetMemArea_ENC/DEC`), so the
   ~44-frame depth is emergent from boot-time byte-capacity — **not a static constant**,
   in `cpapp` or `av-cam`.
+
+## The frame cycle, end to end (settling GLM's open questions)
+
+A follow-on pass (this investigation) resolved the remaining open questions in the
+lens-timing decode — where the frame trigger is dispatched from, why nothing overlaps,
+and the exact camera-side floor. This is the per-frame timeline a visualization should
+draw. All offsets are `cpapp-b.bin` file offsets (VA = file + `0x108000`); all
+constants byte-verified with capstone.
+
+### One bracket frame ≈ 20 VD fields (0.34 s), fully serial
+
+| # | Stage | Fields (typ.) | Bound | What happens | Code anchor (file) |
+|---|---|---|---|---|---|
+| 0 | **Frame kick** | (in-stage) | — | After the *previous* frame's readout, the still-execute pipeline enters its capture-init stage (`Stg>CapInit` / `Stg>CapInitLv` trace strings), packs the per-frame request, and calls the bracket trigger: request(`0x8594A8`) + kick(`0x859504`) → the FSM's pending-kick flag. The trigger also emits an event whose handler sets flag byte `0x0158829A`. | stage bodies file `0x36EBDC` (VA `0x47EBDC`, call site VA `0x47EED2`) and file `0x363BD8` (VA `0x473BD8`, call site VA `0x473E52`); trigger `0x85BA62` |
+| 1 | **FSM state 0 — compute + send** | 1 | exactly 1 per invocation | Target = `step_table[idx] × lens scaling` (see calculator above), clamped; sent as one `MOVE_FC_A` (cmd `0x43`) lens command, **fixed drive profile 0**; first move of a sequence sets the sequence-start bit, mid-sequence doesn't | FSM body `0x27D398` (VA `0x385398`), case 0; target calc `0x27D2F0`; send chain `0x91603E` → `0x928A86` → payload builder `0x2C37E4` (trace `BL_MOVE_FC_A`) |
+| 2 | **FSM state 1 — lens travel wait** | ~6 (bench-derived; lens- and width-dependent) | 1–60 (abort cap) | Polls the *camera-generic* move-done gate once per field: `!0x019CC125` **and** cmd-0x1D completion bit **and** cmd-0x43 move-state (else encoder convergence within ±126 units) **and** `0x019CC126==0` | case 1; poll `0x9160FA`; timeout `cmp r0,#0x3C` @ `0x27D48C` (bytes `3c 28`) |
+| 3 | **FSM state 2 — fixed settle** | **4 (exact)** | exactly 4 | A hard-coded poll counter must reach 4 before the focus-window validation runs; this is the **one camera-side time constant** in the move path | case 2; settle `cmp r0,#4` @ **`0x27D4B4`** (bytes `04 28`); window check vs lens range `[+0xA8..+0xB4]`; retry cap `cmp r0,#0xB` @ `0x27D55A` (≤12 attempts, then abort state 4) |
+| 4 | **FSM state 3 — parked / exposure** | ~9 | ≥9 (imaging) | FSM idles; the stage pipeline arms and runs the exposure + readout — the same 9-field segment a plain burst frame costs. The next kick only comes from the *next* frame's capture-init. | case 3 (empty body); exposure arm on the `EC_ExpWait`/`SetupCap` path (container B) |
+
+**Why bracket runs at ~20 fields while bursts run at 9:** the move cycle (states 0–2,
+~11 fields) is inserted *between* imaging cycles, and the exposure stage cannot arm
+until the FSM parks in state 3. There is no overlap path in the code — the kick site
+lives in the next frame's capture-init stage and the settle gate precedes the park.
+The bench's exact 20 (= ~11 move-side + 9 imaging) confirms the two halves are
+strictly additive with no hidden idle.
+
+**Camera-side floor:** with an idealized zero-travel lens, states 0+2 cost 1+4 = 5
+fields plus at least one poll-tick for state 1 → ~6 fields of body-fixed overhead, so
+even a magic lens could not beat ~15 fields (4 fps) for this drive profile. The only
+camera-side time constants in the whole path: the **4-field settle** (`0x27D4B4`) and
+the 60-field abort cap (`0x27D48C`). Travel time (state 1) is lens physics.
+
+**Drive-profile note:** all five public `MOVE_FC_A` send variants (family
+`0x928A86`–`0x928CBC`) pass fixed literals for the drive/flag bytes; the bracket path
+uses the plain variant (drive 0). No bracket-specific fast/slow drive selection exists
+in `cpapp`; whether the lens interprets those bytes as motor speed is lens-side (OPEN).
 
 ## The one lever we found: the STP buffer-full gate (real, but low-value)
 
@@ -194,9 +238,11 @@ the shipping `cpapp-b.bin`. See [docs/patch.md](docs/patch.md) for the risk writ
 | candidate lever | where | verdict |
 |---|---|---|
 | STP message-gate 2×→1× headroom | file `0x41973E`/`0x419746` | **real, verified — but low-value**; touches neither the 11-field overhead nor the write cliff |
-| focus-step settle constant | — | **does not exist** (zero sleeps in the path) |
+| focus-step settle constant | file `0x27D4B4` | **now located** (follow-up decode): a hard 4-field settle counter in FSM state 2, bytes `04 28`, **one-byte patchable** — but buys ≤2–3 fields (~50 ms/frame) and the settle exists to let the lens/focus-window check see a still image; trimming it risks window-check retries (≤12 budget) and soft-focus frames. High-risk, small reward. |
+| bracket move drive profile | family `0x928A86`–`0x928CBC` | bracket uses the plain fixed profile (drive 0); no faster profile is *selected* anywhere in `cpapp`. Whether a faster profile exists is lens-side (OPEN) — not reachable from the camera binary alone. |
 | step-width table shrink | file `0x27D384` | works, but it's the **existing menu setting** by another name (pure geometry — smaller moves, but more frames for the same depth) |
-| VD comm-window margins | file `0x3B5C26`/`0x9EEA46` | ≤4 fields best case, **lens-protocol-timing risk** (slots are lens-defined) |
+| VD comm-window margins | file `0x3B5C26`/`0x9EEA46` | **refuted as a field-scale cost** by the ns-reading of GetSendTiming (2 µs margins) — no longer a candidate |
+| move/exposure overlap | — | **structurally absent**: the kick is issued from the *next* frame's capture-init and the settle gate precedes the FSM park that the exposure stage waits on; no overlap path exists to patch short of restructuring the sequencer |
 | write-cliff buffer depth | — | **in `av-cam.bin`** (develop subsystem, verified) — runtime-configured (`CdMemMgr`/`SetMemArea`), **no patchable constant** |
 
 ## Practical takeaways (no firmware needed)
@@ -219,8 +265,10 @@ The two avenues this analysis couldn't reach from `cpapp` alone:
    suspected — but its size is **runtime-configured**, with **no tunable depth
    constant**, so there is nothing to patch. This avenue is now closed.
 2. **Dynamic instrumentation.** Splitting the ~11-field focus overhead empirically
-   into lens-move vs comm-hop (e.g. via the firmware's own `ImagerSeqLog`) would
-   confirm the static inference and bound exactly how much, if any, is camera-side.
+   into lens-move vs comm-hop vs settle (e.g. via the firmware's own `ImagerSeqLog`)
+   would confirm the static split — and with the trigger dispatch now traced and the
+   settle constant located, a single logged run at two step widths would nail the
+   travel-vs-settle boundary the visualization can't resolve from statics alone.
 
 ---
 
@@ -480,14 +528,6 @@ Two results:
   `/proc/iomem` / `devmem`), which would also settle the address-visibility question — and
   **enabling that terminal is itself a write** (the shell flags `term` as a write op), so it
   was out of scope for an observe-only run.
-
-A **static corroboration** found since the session (verified against the binary): `cpapp`'s own
-settings/backup client reaches its store over an **inter-chip read**, not a flat local map. The
-backup module `Camera::FC_Sync::BackupDataImpl` (strings `Backup_reset_data` / `BackupData save`
-at VA `0x533F48` / `0x534167`) dispatches its reads through a worker the firmware itself labels
-`'inter chip read error %d'` (VA `0x534778`). So even `cpapp` crosses a chip boundary to reach
-that data — which fits an a15-side dump verb having no direct window onto main-core memory.
-Corroboration, not proof: `/proc/iomem` over the `term` route is still what would settle it.
 
 Scope caveat: one body, one firmware, default packet selectors. A non-zero micon/offset
 selector, or a different firmware, could behave differently; this records what fw 4.00
