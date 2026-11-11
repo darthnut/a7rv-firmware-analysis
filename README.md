@@ -481,6 +481,14 @@ Two results:
   **enabling that terminal is itself a write** (the shell flags `term` as a write op), so it
   was out of scope for an observe-only run.
 
+A **static corroboration** found since the session (verified against the binary): `cpapp`'s own
+settings/backup client reaches its store over an **inter-chip read**, not a flat local map. The
+backup module `Camera::FC_Sync::BackupDataImpl` (strings `Backup_reset_data` / `BackupData save`
+at VA `0x533F48` / `0x534167`) dispatches its reads through a worker the firmware itself labels
+`'inter chip read error %d'` (VA `0x534778`). So even `cpapp` crosses a chip boundary to reach
+that data — which fits an a15-side dump verb having no direct window onto main-core memory.
+Corroboration, not proof: `/proc/iomem` over the `term` route is still what would settle it.
+
 Scope caveat: one body, one firmware, default packet selectors. A non-zero micon/offset
 selector, or a different firmware, could behave differently; this records what fw 4.00
 returned, read-only.
