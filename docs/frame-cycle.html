@@ -1,0 +1,652 @@
+<title>a7R V Bracket Frame Cycle</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap">
+<style>
+/* Layout: a logic-analyzer timing diagram on top (one lane per driver, VD sync as the clock),
+   a what-if panel beside the totals, then one spec card per pipeline stage. */
+:root {
+  --bg: #f3f4f5;
+  --panel: #ffffff;
+  --fg: #16191d;
+  --muted: #5c636c;
+  --line: #d9dde2;
+  --grid: #e8ebee;
+  --body: #0f8a80;     /* body / FSM lane */
+  --lens: #c27a0e;     /* lens travel lane */
+  --img: #5a5fd0;      /* imaging lane */
+  --vd: #8b939c;
+  --cursor: #d1365a;
+  --chip: #eceef1;
+  --font-display: "Barlow Condensed", "Arial Narrow", system-ui, sans-serif;
+  --font-body: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #111418; --panel: #191d22; --fg: #e6e9ec; --muted: #949ca6; --line: #2c3239; --grid: #222830;
+    --body: #35c2b5; --lens: #f0a63a; --img: #9196f5; --vd: #6d7680; --cursor: #ff6d8c; --chip: #232931;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #111418; --panel: #191d22; --fg: #e6e9ec; --muted: #949ca6; --line: #2c3239; --grid: #222830;
+  --body: #35c2b5; --lens: #f0a63a; --img: #9196f5; --vd: #6d7680; --cursor: #ff6d8c; --chip: #232931;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+body {
+  background: var(--bg); color: var(--fg);
+  font-family: var(--font-body); font-size: 15px; line-height: 1.55;
+}
+.wrap {
+  max-width: 1120px; margin: 0 auto;
+  padding-block: 36px 64px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px));
+  padding-right: max(16px, env(safe-area-inset-right, 0px));
+  display: grid; gap: 28px;
+}
+h1, h2, h3 { font-family: var(--font-display); text-wrap: balance; margin: 0; letter-spacing: 0.01em; }
+h1 { font-size: clamp(2rem, 5vw, 3rem); font-weight: 700; line-height: 1.02; }
+h2 { font-size: 1.6rem; font-weight: 600; }
+h3 { font-size: 1.3rem; font-weight: 600; }
+.eyebrow {
+  font-family: var(--font-mono); font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted);
+}
+.lede { max-width: 68ch; color: var(--muted); margin: 10px 0 0; }
+.mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+
+header { display: grid; gap: 6px; }
+.headline-nums { display: flex; flex-wrap: wrap; gap: 10px 28px; margin-top: 14px; }
+.hn { display: grid; }
+.hn b { font-family: var(--font-display); font-size: 2rem; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+.hn span { font-size: 12px; color: var(--muted); }
+
+.panel { background: var(--panel); border: 1px solid var(--line); border-radius: 6px; padding: 20px; min-width: 0; }
+
+/* timing diagram */
+.diagram-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; margin-bottom: 12px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--muted); }
+.legend i { display: inline-block; width: 12px; height: 12px; border-radius: 2px; vertical-align: -1px; margin-right: 6px; }
+.scroll { overflow-x: auto; }
+svg#tl { display: block; width: 100%; min-width: 760px; height: auto; font-family: var(--font-mono); }
+svg#tl text { fill: var(--fg); }
+svg#tl .lbl { font-family: var(--font-body); font-size: 13px; font-weight: 600; }
+svg#tl .sub { fill: var(--muted); font-size: 10.5px; }
+svg#tl .seg { cursor: pointer; }
+svg#tl .seg:hover rect, svg#tl .seg:focus rect { stroke: var(--fg); stroke-width: 1.5; }
+svg#tl .seg:focus { outline: none; }
+.readout {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 10px 18px; margin-top: 12px;
+  font-family: var(--font-mono); font-size: 13px; font-variant-numeric: tabular-nums;
+}
+.readout .state { color: var(--muted); }
+button {
+  font: 500 13px var(--font-body); color: var(--fg); background: var(--chip);
+  border: 1px solid var(--line); border-radius: 4px; padding: 6px 14px; cursor: pointer;
+}
+button:hover { border-color: var(--muted); }
+button:focus-visible, input:focus-visible { outline: 2px solid var(--cursor); outline-offset: 2px; }
+
+/* what-if + totals */
+.two { display: grid; grid-template-columns: 1.1fr 1fr; gap: 20px; }
+@media (max-width: 820px) { .two { grid-template-columns: 1fr; } }
+.ctl { display: grid; gap: 6px; margin-top: 16px; }
+.ctl label { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; font-weight: 500; }
+.ctl label .mono { color: var(--muted); font-weight: 400; }
+.ctl input[type=range] { width: 100%; accent-color: var(--body); }
+.ctl.lens input { accent-color: var(--lens); }
+.ctl .hint { font-size: 12.5px; color: var(--muted); }
+.result { display: flex; flex-wrap: wrap; gap: 10px 26px; margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--line); }
+.warn { margin-top: 12px; font-size: 13px; padding: 8px 10px; border-radius: 4px; background: color-mix(in srgb, var(--cursor) 12%, transparent); color: var(--fg); }
+.reset { margin-top: 14px; }
+
+table.attr { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 14px; }
+table.attr td { padding: 7px 0; border-bottom: 1px solid var(--line); }
+table.attr td:last-child { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+table.attr tr.total td { font-weight: 600; border-bottom: 0; }
+.swatch { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 8px; }
+.note { font-size: 13.5px; color: var(--muted); margin: 12px 0 0; }
+
+/* stage cards */
+.stages { display: grid; gap: 14px; }
+.card { display: grid; grid-template-columns: 210px 1fr; gap: 18px; scroll-margin-top: 20px; transition: box-shadow .3s; }
+.card.flash { box-shadow: 0 0 0 2px var(--cursor); }
+@media (max-width: 720px) { .card { grid-template-columns: 1fr; gap: 10px; } }
+.card .side { display: grid; align-content: start; gap: 8px; padding-left: 12px; border-left: 4px solid var(--c); }
+.card .dur { font-family: var(--font-display); font-size: 1.9rem; font-weight: 600; line-height: 1; font-variant-numeric: tabular-nums; }
+.card .dur small { font-family: var(--font-mono); font-size: 12px; font-weight: 400; color: var(--muted); }
+.chip { display: inline-block; justify-self: start; font-size: 11.5px; font-family: var(--font-mono); padding: 2px 8px; border-radius: 3px; background: var(--chip); color: var(--muted); }
+.card .main { min-width: 0; display: grid; gap: 10px; }
+.flow { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 14px; }
+.flow dt { font-family: var(--font-mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--muted); padding-top: 2px; }
+.flow dd { margin: 0; min-width: 0; }
+.detail { font-size: 14px; color: var(--muted); margin: 0; max-width: 80ch; }
+.code { overflow-x: auto; }
+.code table { border-collapse: collapse; font-family: var(--font-mono); font-size: 12px; font-variant-numeric: tabular-nums; min-width: 100%; }
+.code th { text-align: left; font-weight: 500; color: var(--muted); padding: 4px 14px 4px 0; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.code td { padding: 4px 14px 4px 0; border-bottom: 1px solid var(--grid); white-space: nowrap; }
+.why { display: grid; gap: 22px; }
+.reason { display: grid; gap: 10px; padding-top: 18px; border-top: 1px solid var(--line); }
+.reason p { margin: 0; max-width: 78ch; }
+.rhead { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.rnum { display: inline-grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--fg); color: var(--panel); font-size: 13px; }
+svg.mini { display: block; width: 100%; min-width: 620px; height: auto; font-family: var(--font-mono); }
+svg.mini text { fill: var(--fg); }
+svg.mini .sub { fill: var(--muted); font-size: 11px; }
+.two-sm { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; padding-top: 18px; border-top: 1px solid var(--line); }
+@media (max-width: 760px) { .two-sm { grid-template-columns: 1fr; } }
+.two-sm > div { min-width: 0; }
+ul.tight { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 5px; font-size: 14px; }
+footer { font-size: 13px; color: var(--muted); }
+footer ul { margin: 6px 0 0; padding-left: 18px; }
+@media (prefers-reduced-motion: reduce) { .card { transition: none; } }
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">cpapp-b.bin · fw 4.00 · Investigation 1</div>
+    <h1>One focus-bracket frame, field by field</h1>
+    <p class="lede">What the a7R V does between two frames of a focus bracket. Time is counted in VD fields, the sensor's vertical-sync period of 16.6833 ms. A burst frame costs 9 fields. A bracket frame costs 20, and the extra 11 go to moving and settling the lens before the shutter can fire.</p>
+    <div class="headline-nums">
+      <div class="hn"><b class="mono">20</b><span>fields per bracket frame</span></div>
+      <div class="hn"><b class="mono">334 ms</b><span>≈ 3.0 frames/s</span></div>
+      <div class="hn"><b class="mono">9</b><span>fields per burst frame (151 ms)</span></div>
+      <div class="hn"><b class="mono">+11</b><span>fields of move cycle, fully serial</span></div>
+    </div>
+  </header>
+
+  <section class="panel why" aria-labelledby="why-h">
+    <div>
+      <div class="eyebrow">The short answer</div>
+      <h2 id="why-h">Why a bracket burst is slower than a plain burst</h2>
+      <p class="note" style="max-width:72ch">Imaging costs the same in both modes: 9 fields of exposure and readout. A bracket is slower for two separate reasons, and which one you hit depends on how long the stack is.</p>
+    </div>
+
+    <div class="reason">
+      <div class="rhead"><span class="rnum mono">1</span><h3>Every frame waits for the lens</h3><span class="chip">stacks up to ~44 frames</span></div>
+      <p>A plain burst never moves focus, so the next exposure can start as soon as the last readout ends. In a bracket, the camera has to move the focus group one step and wait for it to stop before it may expose. That adds 11 fields to every frame: 1 to compute and send the move, about 6 while the lens physically travels, and a fixed 4-field settle. The firmware runs this move strictly before the exposure, never during the previous readout, because the next move is only kicked off once the previous frame finishes. 9 + 11 = 20 fields, so the frame rate drops from 6.6 to 3.0 frames per second.</p>
+      <div class="scroll"><svg id="seq" class="mini" role="img" aria-label="Two seconds of shooting: 13 burst frames against 6 bracket frames"></svg></div>
+    </div>
+
+    <div class="reason">
+      <div class="rhead"><span class="rnum mono">2</span><h3>Long stacks fill the buffer</h3><span class="chip">past ~44 frames</span></div>
+      <p>For RAW-L files saved to both the card and the PC, the buffer holds about 44 frames at full speed. After that each new frame has to wait for space while earlier frames are still being developed and written, and the cadence falls to whatever the write path can sustain: about 36 fields (0.6 s) saving to the card only, and 95–116 fields (1.6–1.9 s) when tethered and saving to both. The stall is in the develop subsystem (<span class="mono">av-cam.bin</span>), and its buffer size is set at run time, so the firmware has no constant here to change.</p>
+      <div class="scroll"><svg id="cad" class="mini" role="img" aria-label="Seconds per frame against frame number for a 100-frame stack"></svg></div>
+    </div>
+
+    <div class="two-sm">
+      <div>
+        <h3>Ruled out on the bench</h3>
+        <ul class="tight">
+          <li>Tethering: 20 fields both tethered and card-only.</li>
+          <li>Flash at low power (1/200): same 20 fields and the same cliff at about frame 45.</li>
+          <li>Exposure time: the shutter is far shorter than the frame interval.</li>
+        </ul>
+        <p class="note" style="margin-top:6px">Still open: older card-only stacks ran at 26 fields, not 20. The leading suspect is a flash-recycle interlock (<span class="mono">SB_CHARGE</span> lock, file 0x2213CC) adding fields at higher flash power. The mechanism is in the code; whether it explains the 26 is not yet tested.</p>
+      </div>
+      <div>
+        <h3>What would actually help</h3>
+        <ul class="tight">
+          <li><b>Smaller focus step width.</b> The lens moves less per frame, so the ~6 travel fields shrink.</li>
+          <li><b>A faster-focusing lens.</b> Same effect on the travel time.</li>
+          <li><b>Keep stacks under ~44 frames</b>, or push the cliff later with compressed RAW, a faster card, or saving to one destination.</li>
+          <li><b>Not the settle patch.</b> Lowering the 4-field settle saves 2–3 fields at most and risks soft frames. Even with an instant lens the floor is about 15 fields per frame.</li>
+        </ul>
+      </div>
+    </div>
+  </section>
+
+  <section class="panel" aria-labelledby="tl-h">
+    <div class="diagram-head">
+      <h2 id="tl-h">Timing diagram</h2>
+      <div class="legend">
+        <span><i style="background:var(--body)"></i>Body (FSM)</span>
+        <span><i style="background:var(--lens)"></i>Lens physics</span>
+        <span><i style="background:var(--img)"></i>Imaging pipeline</span>
+      </div>
+    </div>
+    <div class="scroll"><svg id="tl" role="img" aria-label="Timing diagram of one focus-bracket frame"></svg></div>
+    <div class="readout">
+      <button id="play" type="button">Play at 1/10 speed</button>
+      <span id="ro-t">field 0.0 · 0.0 ms</span>
+      <span id="ro-s" class="state">Click a block to jump to its stage, or play to sweep the frame.</span>
+    </div>
+  </section>
+
+  <section class="panel">
+      <h2>Where the extra 11 fields go</h2>
+      <table class="attr">
+        <tr><td><span class="swatch" style="background:var(--body)"></span>Compute target + send MOVE_FC_A</td><td>1 field</td></tr>
+        <tr><td><span class="swatch" style="background:var(--lens)"></span>Lens travel (bench lens, default width)</td><td>6 fields</td></tr>
+        <tr><td><span class="swatch" style="background:var(--body)"></span>Hard settle</td><td>4 fields</td></tr>
+        <tr class="total"><td>Difference from a burst frame</td><td>11 fields · 183.5 ms</td></tr>
+      </table>
+      <p class="note"><b>Body floor.</b> 1 (send) + 1 (minimum state-1 poll) + 4 (settle) = 6 fields the body always spends. Even an instant lens could not beat about 15 fields (250 ms) per frame with this drive profile.</p>
+      <p class="note"><b>No overlap.</b> The move cycle (states 0–2) strictly precedes imaging (state 3). The next kick comes from the next frame's capture-init, and no code path runs them in parallel.</p>
+  </section>
+
+  <section aria-labelledby="st-h" style="display:grid;gap:14px">
+    <h2 id="st-h">Stages</h2>
+    <div class="stages" id="stages"></div>
+  </section>
+
+  <section class="panel" style="display:grid;gap:18px" aria-labelledby="sw-h">
+    <div>
+      <div class="eyebrow">Could it be faster?</div>
+      <h2 id="sw-h">The velocity-drive path</h2>
+      <p class="note" style="max-width:76ch">The 11-field overhead is the cost of doing a discrete move, settle and expose on every frame. A focus sweep does it differently: the lens runs at a constant speed and the shutter fires on a fixed clock, so step width sets the lens speed rather than the frame rate. The firmware decode says the camera can already drive focus this way — it has a true velocity command, and movie AF uses it. It can match the burst rate, not beat it.</p>
+    </div>
+
+    <div class="scroll"><svg id="sweep" class="mini" role="img" aria-label="Focus position over time: today's step-and-settle bracket against a constant-velocity sweep, both taking three frames"></svg></div>
+
+    <div class="two-sm">
+      <div>
+        <h3>What the binary shows</h3>
+        <ul class="tight">
+          <li><b>0x43 (MOVE_FC_A)</b>, the command bracketing uses, moves to a target with <b>no speed or duration field</b>.</li>
+          <li><b>0x49</b> ("MoveFcVel2"), with an older <b>0x3C</b> fallback, carries a signed 16-bit <b>velocity</b> and no target: drive until stopped. The AF search loops already use it.</li>
+          <li><b>AF Drive Speed</b> and <b>Movie AF Drive Speed</b> are a velocity multiplier — a global scale byte at <span class="mono">0x011933EC</span> that every velocity send passes through. The drive path is velocity-native.</li>
+          <li><b>0x1F</b> is a richer 14-byte drive verb, the candidate for speed or accel shaping; its fields live in the lens and aren't confirmed.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>What it would still take</h3>
+        <ul class="tight">
+          <li>New <b>sequencer logic</b>: fire the shutter on a clock during a 0x49 drive, instead of the move → settle → expose loop. Not a byte patch.</li>
+          <li><b>Mechanical shutter only.</b> The a7R V's sensor reads out slowly, so a moving focus plane under the electronic shutter would smear focus top to bottom.</li>
+          <li><b>Even speed matters.</b> Uneven lens velocity gives uneven slice spacing, which stacks as soft bands.</li>
+          <li>The ceiling is the <b>9-field burst rate.</b> A sweep removes the move overhead; it can't beat the imaging floor.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="note" style="border-top:1px solid var(--line);padding-top:14px"><b>Status.</b> The command bytes are byte-verified in cpapp-b.bin: the 0x43 builder at 0x2CB7E4, the velocity builders at 0x92781E (0x3C) and 0x927848 (0x49), and the speed-scale table at 0x28B364. That movie transitions ride the same 0x49 path, and the exact meaning of 0x1F, are inferred from the decode and still want a lens-protocol log to confirm. Source: notes/glm-focus-drive-protocol.md.</p>
+  </section>
+
+  <footer>
+    Offsets are file offsets in cpapp-b.bin; VA = file + 0x108000. Constants byte-verified. Durations for stages 1–3 come from the static decode; stage 2's lens travel is the bench residual (measured 20 − fixed 14).
+    <ul>
+      <li>README.md, Investigation 1, “The frame cycle, end to end”</li>
+      <li>notes/glm-lens-timing.md: full static decode with READ/INFERRED labels</li>
+      <li>work/ghidra_export/trigger_trace/: decompiles of trigger, callers, stage containers, move family</li>
+      <li>RESULTS.md: bench cadence measurements (fw 4.00)</li>
+    </ul>
+  </footer>
+</div>
+
+<script>
+const FIELD_MS = 16.6833;
+const BURST = 9;
+
+const STAGES = [
+  { id: 0, name: "Frame kick", lane: "body", dur: "0", durNote: "in-stage, no field cost",
+    type: "in-stage", driver: "Body (stage scheduler)",
+    entry: "Previous frame's readout done; still-execute pipeline enters capture-init (Stg>CapInit / Stg>CapInitLv)",
+    exit: "Bracket request written, kick flag set, event emitted (handler sets RAM 0x0158829A)",
+    detail: "Runs inside the capture-init stage, so it costs no field of its own.",
+    code: [
+      ["Stg>CapInit", "0x36EBDC", "0x47EBDC", "call 0x47EED2 · caller 0x48D6D4"],
+      ["Stg>CapInitLv", "0x363BD8", "0x473BD8", "call 0x473E52 · caller 0x48D7A0"],
+      ["trigger", "0x85BA62", "0x963A62", ""],
+      ["request_setter", "0x8594A8", "0x9614A8", ""],
+      ["kick_setter", "0x859504", "0x961504", ""],
+      ["event_emitter", "0x8E187E", "0x9E987E", ""],
+      ["event_handler", "0x89914A", "0x9A814A", "sets flag 0x0158829A"]
+    ] },
+  { id: 1, name: "FSM state 0: compute target, send MOVE_FC_A", lane: "body", dur: "1", durNote: "16.7 ms",
+    type: "body constant · one poll tick", driver: "Body",
+    entry: "Kick consumed; lens context present; lens idle/ready",
+    exit: "MOVE_FC_A (cmd 0x43) queued to lens; FSM → state 1",
+    detail: "target = clamp(start_pos ± (step_table[idx] × (lens_ctx[0xE] >> 1)) >> 6). Step table = {32, 42, 53, 64, 74, 85, 96, 106, 117, 128}. Drive profile fixed at 0; the first move of a sequence sets the sequence-start bit.",
+    code: [
+      ["fsm_body", "0x27D398", "0x385398", ""],
+      ["target_calc", "0x27D2F0", "0x3852F0", ""],
+      ["step_table", "0x27D384", "0x385384", "10 entries"],
+      ["send_chain", "", "", "0x91603E → 0x928A86 → 0x2CB7E4 (VA 0x3D37E4, BL:MOVE_FC_A trace)"]
+    ] },
+  { id: 2, name: "FSM state 1: lens travel wait", lane: "lens", dur: "6", durNote: "100.1 ms · bounds 1–60",
+    type: "lens physics · bench residual", driver: "Lens travel time + body poll cadence",
+    entry: "Move command sent",
+    exit: "All four move-done sub-checks pass (or the 60-field abort cap → state 4)",
+    detail: "Polled once per VD field through the camera-generic move-done gate, the same one the AF path uses: !0x019CC125, AND the cmd-0x1D completion bit (7×0xC table at RAM 0x01109114, byte +5), AND the cmd-0x43 move-state (else encoder convergence within ±126 units), AND 0x019CC126 == 0.",
+    code: [
+      ["poll", "0x9160FA", "0xA1E0FA", ""],
+      ["timeout_cmp", "0x27D48C", "0x38548C", "3c 28 · 0x3C = 60 fields"]
+    ] },
+  { id: 3, name: "FSM state 2: fixed settle + focus-window check", lane: "body", dur: "4", durNote: "66.7 ms",
+    type: "body constant · hard poll counter", driver: "Body",
+    entry: "Move-done reported",
+    exit: "Settle counter reaches 4, then lens position validated inside the requested window (else retry, up to 12 attempts, then abort → state 4)",
+    detail: "The camera-side time constant. Patchable in one byte (cmp r0,#4 → cmp r0,#N). Trimming risks window-check retries and soft frames, and buys 2–3 fields at most.",
+    code: [
+      ["settle_cmp", "0x27D4B4", "0x3854B4", "04 28 · 4 fields"],
+      ["window_retry_cap", "0x27D55A", "0x38555A", "0b 28 · 0xB (12 attempts)"]
+    ] },
+  { id: 4, name: "FSM state 3: parked; exposure + readout", lane: "img", dur: "9", durNote: "151.0 ms",
+    type: "imaging pipeline · bench-anchored", driver: "Body (imaging)",
+    entry: "FSM parks in state 3 (move done, settled, window validated)",
+    exit: "Exposure and readout complete; pipeline advances to the next frame's capture-init",
+    detail: "The state-3 body is empty. Exposure arms on the EC_ExpWait / SetupCap path, since the kick was issued at frame start. Costs exactly what a burst frame costs.",
+    code: [["fsm_case3", "", "", "empty body in fsm_body 0x27D398"]] }
+];
+const LANE_VAR = { body: "--body", lens: "--lens", img: "--img" };
+
+/* ---- stage cards ---- */
+const stagesEl = document.getElementById("stages");
+for (const s of STAGES) {
+  const el = document.createElement("article");
+  el.className = "panel card"; el.id = "stage-" + s.id;
+  el.style.setProperty("--c", `var(${LANE_VAR[s.lane]})`);
+  const rows = s.code.map(c => `<tr><td>${c[0]}</td><td>${c[1]}</td><td>${c[2]}</td><td>${c[3]}</td></tr>`).join("");
+  el.innerHTML = `
+    <div class="side">
+      <div class="eyebrow">Stage ${s.id}</div>
+      <div class="dur">${s.dur} <small>field${s.dur === "1" ? "" : "s"}</small></div>
+      <div class="mono" style="font-size:12px;color:var(--muted)">${s.durNote}</div>
+      <span class="chip">${s.type}</span>
+    </div>
+    <div class="main">
+      <h3>${s.name}</h3>
+      <dl class="flow">
+        <dt>Driver</dt><dd>${s.driver}</dd>
+        <dt>Entry</dt><dd>${s.entry}</dd>
+        <dt>Exit</dt><dd>${s.exit}</dd>
+      </dl>
+      <p class="detail">${s.detail}</p>
+      <div class="code"><table><tr><th>symbol</th><th>file</th><th>VA</th><th>note</th></tr>${rows}</table></div>
+    </div>`;
+  stagesEl.appendChild(el);
+}
+function jump(id) {
+  const c = document.getElementById("stage-" + id);
+  if (!c) return;
+  const reduce = matchMedia("(prefers-reduced-motion: reduce)").matches;
+  c.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  c.classList.add("flash"); setTimeout(() => c.classList.remove("flash"), 1400);
+}
+
+/* ---- timing diagram ---- */
+const svg = document.getElementById("tl");
+const NS = "http://www.w3.org/2000/svg";
+const W = 1000, LX = 132, RX = 20;
+const LANES = [
+  { key: "vd", label: "VD sync", sub: "16.68 ms field", y: 24, h: 22 },
+  { key: "body", label: "Body FSM", sub: "states 0–3", y: 62, h: 40 },
+  { key: "lens", label: "Lens", sub: "focus group", y: 114, h: 40 },
+  { key: "img", label: "Imaging", sub: "exposure + readout", y: 166, h: 40 },
+  { key: "burst", label: "Burst frame", sub: "reference", y: 232, h: 30 }
+];
+const AXIS_Y = 284, H = 322;
+let travel = 6, settle = 4;
+let total = 0, sx = 1;
+
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  (parent || svg).appendChild(e);
+  return e;
+}
+function segments() {
+  const a = 0, b = 1, c = b + travel, d = c + settle, e = d + BURST;
+  return [
+    { stage: 1, lane: "body", x0: a, x1: b, txt: "S0 send", color: "--body" },
+    { stage: 2, lane: "body", x0: b, x1: c, txt: "S1 poll move-done", color: "--body", dim: true, ticks: true },
+    { stage: 2, lane: "lens", x0: b, x1: c, txt: "travel", color: "--lens" },
+    { stage: 3, lane: "body", x0: c, x1: d, txt: "S2 settle", color: "--body", counter: true },
+    { stage: 4, lane: "body", x0: d, x1: e, txt: "S3 parked", color: "--body", dim: true, faint: true },
+    { stage: 4, lane: "img", x0: d, x1: e, txt: "exposure + readout", color: "--img" }
+  ];
+}
+function draw() {
+  svg.innerHTML = "";
+  total = 1 + travel + settle + BURST;
+  const span = Math.max(total, 20);
+  sx = (W - LX - RX) / span;
+  const X = f => LX + f * sx;
+  svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
+
+  // field grid + VD pulses
+  const step = span > 40 ? 5 : 1;
+  for (let f = 0; f <= total; f++) {
+    el("line", { x1: X(f), x2: X(f), y1: 18, y2: AXIS_Y, stroke: "var(--grid)", "stroke-width": 1 });
+  }
+  for (let f = 0; f < total; f++) {
+    const x = X(f), w = Math.max(2, Math.min(5, sx * 0.18));
+    el("rect", { x: x, y: LANES[0].y, width: w, height: LANES[0].h, fill: "var(--vd)" });
+  }
+  el("line", { x1: LX, x2: X(total), y1: LANES[0].y + LANES[0].h, y2: LANES[0].y + LANES[0].h, stroke: "var(--vd)", "stroke-width": 1 });
+
+  // lane labels
+  for (const L of LANES) {
+    el("text", { x: 0, y: L.y + L.h / 2 - 1, class: "lbl" }).textContent = L.label;
+    el("text", { x: 0, y: L.y + L.h / 2 + 13, class: "sub" }).textContent = L.sub;
+  }
+  el("line", { x1: 0, x2: W - RX, y1: 220, y2: 220, stroke: "var(--line)", "stroke-dasharray": "3 4" });
+
+  // stage 0 kick marker
+  const kx = X(0);
+  el("path", { d: `M${kx} 56 l6 -9 h-12 z`, fill: "var(--cursor)" });
+  const kt = el("text", { x: kx + 9, y: 54, class: "sub" }); kt.textContent = "kick (stage 0)";
+
+  // segments
+  for (const s of segments()) {
+    const L = LANES.find(l => l.key === s.lane);
+    const g = el("g", { class: "seg", tabindex: 0, role: "button", "aria-label": `Stage ${s.stage}: ${s.txt}` });
+    const x = X(s.x0) + 1, w = Math.max(1, (s.x1 - s.x0) * sx - 2);
+    el("rect", { x, y: L.y, width: w, height: L.h, rx: 3,
+      fill: `var(${s.color})`, "fill-opacity": s.faint ? 0.14 : s.dim ? 0.3 : 0.9 }, g);
+    if (s.ticks) {
+      for (let f = s.x0 + 1; f <= s.x1; f++) {
+        el("line", { x1: X(f) - 1, x2: X(f) - 1, y1: L.y + 6, y2: L.y + L.h - 6, stroke: `var(${s.color})`, "stroke-width": 2 }, g);
+      }
+    }
+    if (s.counter) {
+      for (let i = 1; i <= settle; i++) {
+        if (sx > 18) {
+          const t = el("text", { x: X(s.x0 + i) - sx / 2, y: L.y + L.h - 6, "text-anchor": "middle", "font-size": 10, style: "fill:var(--panel)" }, g);
+          t.textContent = i;
+        }
+      }
+    }
+    const solid = !s.dim && !s.faint;
+    if (w > 46) {
+      const t = el("text", { x: x + 6, y: L.y + (s.counter ? 15 : L.h / 2 + 4), "font-size": 11.5,
+        style: solid ? "fill:var(--panel);font-weight:500" : "fill:var(--fg)" }, g);
+      t.textContent = s.txt;
+    }
+    g.addEventListener("click", () => jump(s.stage));
+    g.addEventListener("keydown", ev => { if (ev.key === "Enter" || ev.key === " ") { ev.preventDefault(); jump(s.stage); } });
+  }
+
+  // burst reference
+  const B = LANES[4];
+  el("rect", { x: X(0) + 1, y: B.y, width: BURST * sx - 2, height: B.h, rx: 3, fill: "var(--img)", "fill-opacity": 0.9 });
+  el("text", { x: X(0) + 7, y: B.y + B.h / 2 + 4, "font-size": 11.5, style: "fill:var(--panel);font-weight:500" }).textContent = "exposure + readout · 9 fields";
+  el("line", { x1: X(BURST), x2: X(total), y1: B.y + B.h / 2, y2: B.y + B.h / 2, stroke: "var(--muted)", "stroke-dasharray": "2 3" });
+  const dt = el("text", { x: X(BURST) + 6, y: B.y - 4, class: "sub" });
+  dt.textContent = `bracket costs +${total - BURST} fields (${((total - BURST) * FIELD_MS).toFixed(1)} ms)`;
+
+  // axis
+  el("line", { x1: LX, x2: X(total), y1: AXIS_Y, y2: AXIS_Y, stroke: "var(--muted)" });
+  const lstep = span > 40 ? 10 : span > 24 ? 5 : 2;
+  for (let f = 0; f <= total; f += step) {
+    el("line", { x1: X(f), x2: X(f), y1: AXIS_Y, y2: AXIS_Y + (f % lstep === 0 ? 6 : 3), stroke: "var(--muted)" });
+  }
+  for (let f = 0; f <= total; f += lstep) {
+    if (total - f < lstep * 0.6 && f !== total) continue;
+    el("text", { x: X(f), y: AXIS_Y + 18, "text-anchor": "middle", "font-size": 11 }).textContent = f;
+    el("text", { x: X(f), y: AXIS_Y + 31, "text-anchor": "middle", class: "sub" }).textContent = Math.round(f * FIELD_MS) + " ms";
+  }
+  if (total % lstep !== 0) {
+    el("text", { x: X(total), y: AXIS_Y + 18, "text-anchor": "middle", "font-size": 11, "font-weight": 600 }).textContent = total;
+    el("text", { x: X(total), y: AXIS_Y + 31, "text-anchor": "middle", class: "sub" }).textContent = Math.round(total * FIELD_MS) + " ms";
+  }
+  el("text", { x: LX - 8, y: AXIS_Y + 18, "text-anchor": "end", class: "sub" }).textContent = "field";
+
+  // cursor
+  cursor = el("g", { visibility: "hidden" });
+  el("line", { x1: 0, x2: 0, y1: 16, y2: AXIS_Y, stroke: "var(--cursor)", "stroke-width": 2 }, cursor);
+}
+
+/* ---- playback ---- */
+let cursor, raf = null, t0 = 0;
+const SLOW = 10;
+const roT = document.getElementById("ro-t"), roS = document.getElementById("ro-s"), playBtn = document.getElementById("play");
+function describe(f) {
+  const b = 1, c = b + travel, d = c + settle;
+  if (f < b) return "Stage 1 · FSM state 0 · compute target, MOVE_FC_A (0x43) queued";
+  if (f < c) return `Stage 2 · FSM state 1 · lens travelling, move-done poll ${Math.floor(f - b) + 1}/${travel}`;
+  if (f < d) return `Stage 3 · FSM state 2 · settle counter ${Math.floor(f - c) + 1}/${settle}, then window check`;
+  return `Stage 4 · FSM state 3 parked · exposure + readout, field ${Math.floor(f - d) + 1}/${BURST}`;
+}
+function setCursor(f) {
+  cursor.setAttribute("visibility", "visible");
+  cursor.setAttribute("transform", `translate(${LX + f * sx},0)`);
+  roT.textContent = `field ${f.toFixed(1)} · ${(f * FIELD_MS).toFixed(1)} ms`;
+  roS.textContent = describe(f);
+}
+function tick(now) {
+  const f = (now - t0) / (FIELD_MS * SLOW);
+  if (f >= total) {
+    setCursor(total);
+    roS.textContent = "Frame done → next frame's capture-init issues the next kick";
+    raf = null; playBtn.textContent = "Play at 1/10 speed"; return;
+  }
+  setCursor(f);
+  raf = requestAnimationFrame(tick);
+}
+playBtn.addEventListener("click", () => {
+  if (raf) { cancelAnimationFrame(raf); raf = null; playBtn.textContent = "Play at 1/10 speed"; return; }
+  t0 = performance.now(); playBtn.textContent = "Stop";
+  raf = requestAnimationFrame(tick);
+});
+function stopPlay() { if (raf) { cancelAnimationFrame(raf); raf = null; playBtn.textContent = "Play at 1/10 speed"; } }
+
+/* measured values; the diagram is static */
+draw();
+
+/* ---- why section: 2-second sequence ---- */
+(function () {
+  const s = document.getElementById("seq");
+  const W2 = 1000, L2 = 118, R2 = 92, FIELDS = 120;
+  const k = (W2 - L2 - R2) / FIELDS, X = f => L2 + f * k;
+  s.setAttribute("viewBox", `0 0 ${W2} 150`);
+  const rows = [
+    { y: 14, label: "Burst", sub: "9 fields/frame", parts: [["--img", 9]] },
+    { y: 62, label: "Focus bracket", sub: "20 fields/frame", parts: [["--body", 1], ["--lens", 6], ["--body", 4], ["--img", 9]] }
+  ];
+  for (let f = 0; f <= FIELDS; f += 30) {
+    el("line", { x1: X(f), x2: X(f), y1: 8, y2: 112, stroke: "var(--grid)" }, s);
+    el("text", { x: X(f), y: 128, "text-anchor": "middle", "font-size": 11 }, s).textContent = (f * FIELD_MS / 1000).toFixed(1) + " s";
+  }
+  for (const r of rows) {
+    el("text", { x: 0, y: r.y + 15, style: "font-family:var(--font-body);font-size:13px;font-weight:600" }, s).textContent = r.label;
+    el("text", { x: 0, y: r.y + 29, class: "sub" }, s).textContent = r.sub;
+    const per = r.parts.reduce((a, p) => a + p[1], 0);
+    let n = 0;
+    for (let t = 0; t + per <= FIELDS; t += per) {
+      let x = t;
+      for (const [c, w] of r.parts) {
+        el("rect", { x: X(x) + 0.5, y: r.y, width: w * k - 1, height: 34, fill: `var(${c})`, "fill-opacity": c === "--img" ? 0.9 : 0.85 }, s);
+        x += w;
+      }
+      el("rect", { x: X(t + per) - 1.5, y: r.y - 3, width: 2, height: 40, fill: "var(--fg)" }, s);
+      n++;
+    }
+    el("text", { x: W2 - R2 + 10, y: r.y + 15, "font-size": 13, "font-weight": 600 }, s).textContent = n + " frames";
+    el("text", { x: W2 - R2 + 10, y: r.y + 29, class: "sub" }, s).textContent = "in 2.0 s";
+  }
+  el("text", { x: L2, y: 146, class: "sub" }, s).textContent =
+    "teal = body (send, settle) · amber = lens travel · blue = exposure + readout · black tick = frame done";
+})();
+
+/* ---- why section: cadence across a stack ---- */
+(function () {
+  const s = document.getElementById("cad");
+  const W2 = 1000, L2 = 60, R2 = 210, T = 16, B = 196, N = 100, YMAX = 2.0;
+  const X = n => L2 + (n - 1) / (N - 1) * (W2 - L2 - R2);
+  const Y = v => B - v / YMAX * (B - T);
+  s.setAttribute("viewBox", `0 0 ${W2} 240`);
+  for (let v = 0; v <= YMAX + 1e-9; v += 0.5) {
+    el("line", { x1: L2, x2: W2 - R2, y1: Y(v), y2: Y(v), stroke: "var(--grid)" }, s);
+    el("text", { x: L2 - 8, y: Y(v) + 4, "text-anchor": "end", "font-size": 11 }, s).textContent = v.toFixed(1) + " s";
+  }
+  for (const n of [1, 20, 44, 60, 80, 100]) {
+    el("text", { x: X(n), y: B + 18, "text-anchor": "middle", "font-size": 11 }, s).textContent = n;
+  }
+  el("text", { x: (L2 + W2 - R2) / 2, y: B + 36, "text-anchor": "middle", class: "sub" }, s).textContent = "frame number in the stack";
+  // cliff band
+  el("rect", { x: X(44), y: T, width: X(46) - X(44), height: B - T, fill: "var(--cursor)", "fill-opacity": 0.12 }, s);
+  el("text", { x: X(45), y: T + 12, "text-anchor": "middle", class: "sub" }, s).textContent = "buffer full";
+  // tethered band 1.6–1.9
+  el("rect", { x: X(45), y: Y(1.9), width: X(N) - X(45), height: Y(1.6) - Y(1.9), fill: "var(--lens)", "fill-opacity": 0.18 }, s);
+  const line = (pts, color, dash) => el("path", { d: "M" + pts.map(p => `${X(p[0])},${Y(p[1])}`).join(" L"), fill: "none", stroke: `var(${color})`, "stroke-width": 2.5, "stroke-dasharray": dash || "none", "stroke-linejoin": "round" }, s);
+  line([[1, 0.334], [44, 0.334], [45, 1.75], [N, 1.75]], "--lens");
+  line([[1, 0.334], [44, 0.334], [45, 0.6], [N, 0.6]], "--body");
+  line([[1, 0.151], [14, 0.151]], "--img");
+  line([[14, 0.151], [30, 0.151]], "--img", "3 4");
+  const lab = (y, color, a, b) => {
+    el("text", { x: W2 - R2 + 10, y: Y(y) + 4, "font-size": 12, "font-weight": 600, style: `fill:var(${color})` }, s).textContent = a;
+    el("text", { x: W2 - R2 + 10, y: Y(y) + 18, class: "sub" }, s).textContent = b;
+  };
+  lab(1.75, "--lens", "Bracket, tethered + card", "95–116 fields after cliff");
+  lab(0.75, "--body", "Bracket, card only", "~36 fields after cliff");
+  el("text", { x: X(30) + 8, y: Y(0.151) + 4, "font-size": 12, "font-weight": 600, style: "fill:var(--img)" }, s).textContent = "Burst, 9 fields";
+  el("text", { x: X(30) + 8, y: Y(0.151) + 18, class: "sub" }, s).textContent = "measured to frame 14 only";
+  el("text", { x: X(6), y: Y(0.334) - 8, class: "sub" }, s).textContent = "bracket fast zone, 20 fields";
+})();
+
+/* ---- velocity-drive section: step-and-settle vs constant-velocity sweep ---- */
+(function () {
+  const s = document.getElementById("sweep");
+  const W2 = 1000, L2 = 150, R2 = 196, T = 22, B = 212, TMAX = 60, STEPS = 3;
+  s.setAttribute("viewBox", `0 0 ${W2} 272`);
+  const X = f => L2 + f / TMAX * (W2 - L2 - R2);
+  const Y = p => B - p / STEPS * (B - T);
+  // focus-position gridlines
+  for (let p = 0; p <= STEPS; p++) {
+    el("line", { x1: L2, x2: W2 - R2, y1: Y(p), y2: Y(p), stroke: "var(--grid)" }, s);
+    if (p > 0) el("text", { x: L2 - 10, y: Y(p) + 4, "text-anchor": "end", class: "sub" }, s).textContent = "step " + p;
+  }
+  el("text", { x: 0, y: (Y(0) + Y(STEPS)) / 2, class: "sub", transform: `rotate(-90 12 ${(Y(0) + Y(STEPS)) / 2})`, x: 12 }, s).textContent = "focus position";
+  // time axis
+  el("line", { x1: L2, x2: X(TMAX), y1: B, y2: B, stroke: "var(--muted)" }, s);
+  for (let f = 0; f <= TMAX; f += 10) {
+    el("line", { x1: X(f), x2: X(f), y1: B, y2: B + 5, stroke: "var(--muted)" }, s);
+    el("text", { x: X(f), y: B + 19, "text-anchor": "middle", "font-size": 11 }, s).textContent = f;
+    el("text", { x: X(f), y: B + 32, "text-anchor": "middle", class: "sub" }, s).textContent = Math.round(f * FIELD_MS) + " ms";
+  }
+  el("text", { x: X(TMAX / 2), y: B + 48, "text-anchor": "middle", class: "sub" }, s).textContent = "time (VD fields)";
+
+  const path = (d, color, dash) => el("path", { d, fill: "none", stroke: `var(${color})`, "stroke-width": 2.5, "stroke-dasharray": dash || "none", "stroke-linejoin": "round" }, s);
+  // shutter mark: little triangle + tick sitting on the trace
+  const shot = (f, p, color) => {
+    const x = X(f), y = Y(p);
+    el("path", { d: `M${x} ${y - 7} l5 -8 h-10 z`, fill: `var(${color})` }, s);
+    el("circle", { cx: x, cy: y, r: 3, fill: `var(${color})` }, s);
+  };
+
+  // today: step + settle. Each frame = 20 fields: 1 send, 6 travel (ramp), 4 settle + 9 expose (hold). Shoots at field+11.
+  let d = "M" + X(0) + " " + Y(0);
+  for (let i = 0; i < STEPS; i++) {
+    const base = i * 20;
+    d += ` L${X(base + 1)} ${Y(i)} L${X(base + 7)} ${Y(i + 1)} L${X(base + 20)} ${Y(i + 1)}`;
+  }
+  path(d, "--lens");
+  for (let i = 0; i < STEPS; i++) shot(i * 20 + 11, i + 1, "--lens");
+
+  // sweep: constant velocity, reaches step 3 in 3*9 = 27 fields; shoots every 9 fields crossing each step
+  path(`M${X(0)} ${Y(0)} L${X(27)} ${Y(3)}`, "--img");
+  path(`M${X(27)} ${Y(3)} L${X(TMAX)} ${Y(3)}`, "--img", "3 5");
+  for (let k = 1; k <= STEPS; k++) shot(k * 9, k, "--img");
+
+  // labels
+  const lab = (y, color, a, b) => {
+    el("text", { x: W2 - R2 + 10, y: y, "font-size": 12.5, "font-weight": 600, style: `fill:var(${color})` }, s).textContent = a;
+    el("text", { x: W2 - R2 + 10, y: y + 15, class: "sub" }, s).textContent = b;
+  };
+  lab(Y(3) - 2, "--img", "Sweep", "3 frames · 27 fields");
+  lab(Y(2.1), "--lens", "Today", "3 frames · 60 fields");
+  el("text", { x: L2 + 6, y: T - 7, class: "sub" }, s).textContent = "▲ = shutter fires · same 3 focus positions, same focus range";
+})();
+</script>
