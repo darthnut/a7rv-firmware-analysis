@@ -636,6 +636,30 @@ the **eMMC AES-XTS** encryption on the camera itself. "We can read the firmware"
 "we can flash a modified one onto a body" rest on different pieces of the upstream work,
 and **only reading is settled** — this project stays on the reading side.
 
+### Related work — parallel efforts
+
+Separate from the upstream this builds on, a few projects reverse-engineer
+*current-generation* Sony bodies in ways that run close to this one:
+
+- **[t2r05 — ILME-FX30 service-mode research](https://github.com/t2r05/fx30-senser-map)**
+  — maps the FX30's USB service session (Senser / Jiritsu) on fw 6.00/6.01: which
+  channels are reachable, what the data looks like, and a reproducible hidden-burst
+  enable via an equal-length firmware patch. Same generation and the same
+  offsets-not-binaries ethos as this repo; it parallels Investigation 2's service-mode
+  work closely.
+- **[YuuLuo — A7C II Camera Tools](https://github.com/YuuLuo/a7c2-camera-tools)** —
+  reproducible firmware tooling for the ILCE-7CM2: a service-mode (Jiritsu) worker that
+  builds a patched 2.00 DAT to enable Creative Look modes and the shutter sound. More
+  applied modding than static write-up, but the same modern-body service machinery.
+- **[ma1co — OpenMemories-Symbols](https://github.com/ma1co/OpenMemories-Symbols)** — a
+  database of reverse-engineered firmware symbols (`bin2elf` for `av.bin`): the
+  symbol-naming side of this kind of work, for a few older bodies.
+- **[obs1dium — FocusBracket](https://github.com/obs1dium/FocusBracket)** — an early
+  (2016, A5100) proof-of-concept that drove focus bracketing from the OpenMemories app
+  layer, before Sony shipped the feature natively. Thematically adjacent to
+  Investigation 1, though it uses the public app API rather than touching the capture
+  pipeline.
+
 ---
 
 ## Method
