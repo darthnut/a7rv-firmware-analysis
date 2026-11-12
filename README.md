@@ -18,6 +18,9 @@ derived analysis.
 - **Investigations** — each one states what we wanted to improve, what the binary
   actually shows, and whether there's a firmware lever worth pursuing. The first is
   below.
+- **[Interactive frame-cycle timeline](https://darthnut.github.io/a7rv-firmware-analysis/docs/frame-cycle.html)**
+  — the per-frame bracket timing diagram and the velocity-drive findings as a viewable
+  page (published via GitHub Pages).
 - **[docs/method.md](docs/method.md)** — shared tooling, the Ghidra setup, the
   `movw`/`movt` address-resolution trap, and a running address reference.
 - **[docs/patch.md](docs/patch.md)** — detailed risk write-up for the one candidate

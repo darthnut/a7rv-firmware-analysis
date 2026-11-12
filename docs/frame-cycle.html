@@ -214,31 +214,7 @@ footer ul { margin: 6px 0 0; padding-left: 18px; }
     </div>
   </section>
 
-  <section class="two">
-    <div class="panel">
-      <h2>What if</h2>
-      <p class="note" style="margin-top:6px">Move the two variable parts of the cycle and the diagram above redraws. Send (1 field) and imaging (9 fields) stay fixed.</p>
-      <div class="ctl lens">
-        <label for="travel">Lens travel wait (state 1) <span class="mono" id="travel-v"></span></label>
-        <input id="travel" type="range" min="1" max="60" step="1" value="6">
-        <div class="hint">Depends on the lens and the step width. Polled once per field; 60 fields is the abort cap (cmp at 0x27D48C).</div>
-      </div>
-      <div class="ctl">
-        <label for="settle">Hard settle counter (state 2) <span class="mono" id="settle-v"></span></label>
-        <input id="settle" type="range" min="1" max="8" step="1" value="4">
-        <div class="hint">The one-byte constant at 0x27D4B4 (<span class="mono">cmp r0,#4</span>). Stock value is 4.</div>
-      </div>
-      <div class="result">
-        <div class="hn"><b class="mono" id="r-f">20</b><span>fields / frame</span></div>
-        <div class="hn"><b class="mono" id="r-ms">334 ms</b><span>per frame</span></div>
-        <div class="hn"><b class="mono" id="r-fps">3.00</b><span>frames / s</span></div>
-        <div class="hn"><b class="mono" id="r-d">+11</b><span>vs burst</span></div>
-      </div>
-      <div class="warn" id="warn" hidden>Settle below 4 is untested on the bench. Static decode says it risks failing the focus-window check, which retries up to 12 times before aborting, and soft frames. Expected gain is 2–3 fields at most.</div>
-      <button class="reset" id="reset" type="button">Reset to measured values</button>
-    </div>
-
-    <div class="panel">
+  <section class="panel">
       <h2>Where the extra 11 fields go</h2>
       <table class="attr">
         <tr><td><span class="swatch" style="background:var(--body)"></span>Compute target + send MOVE_FC_A</td><td>1 field</td></tr>
@@ -248,12 +224,43 @@ footer ul { margin: 6px 0 0; padding-left: 18px; }
       </table>
       <p class="note"><b>Body floor.</b> 1 (send) + 1 (minimum state-1 poll) + 4 (settle) = 6 fields the body always spends. Even an instant lens could not beat about 15 fields (250 ms) per frame with this drive profile.</p>
       <p class="note"><b>No overlap.</b> The move cycle (states 0–2) strictly precedes imaging (state 3). The next kick comes from the next frame's capture-init, and no code path runs them in parallel.</p>
-    </div>
   </section>
 
   <section aria-labelledby="st-h" style="display:grid;gap:14px">
     <h2 id="st-h">Stages</h2>
     <div class="stages" id="stages"></div>
+  </section>
+
+  <section class="panel" style="display:grid;gap:18px" aria-labelledby="sw-h">
+    <div>
+      <div class="eyebrow">Could it be faster?</div>
+      <h2 id="sw-h">The velocity-drive path</h2>
+      <p class="note" style="max-width:76ch">The 11-field overhead is the cost of doing a discrete move, settle and expose on every frame. A focus sweep does it differently: the lens runs at a constant speed and the shutter fires on a fixed clock, so step width sets the lens speed rather than the frame rate. The firmware decode says the camera can already drive focus this way — it has a true velocity command, and movie AF uses it. It can match the burst rate, not beat it.</p>
+    </div>
+
+    <div class="scroll"><svg id="sweep" class="mini" role="img" aria-label="Focus position over time: today's step-and-settle bracket against a constant-velocity sweep, both taking three frames"></svg></div>
+
+    <div class="two-sm">
+      <div>
+        <h3>What the binary shows</h3>
+        <ul class="tight">
+          <li><b>0x43 (MOVE_FC_A)</b>, the command bracketing uses, moves to a target with <b>no speed or duration field</b>.</li>
+          <li><b>0x49</b> ("MoveFcVel2"), with an older <b>0x3C</b> fallback, carries a signed 16-bit <b>velocity</b> and no target: drive until stopped. The AF search loops already use it.</li>
+          <li><b>AF Drive Speed</b> and <b>Movie AF Drive Speed</b> are a velocity multiplier — a global scale byte at <span class="mono">0x011933EC</span> that every velocity send passes through. The drive path is velocity-native.</li>
+          <li><b>0x1F</b> is a richer 14-byte drive verb, the candidate for speed or accel shaping; its fields live in the lens and aren't confirmed.</li>
+        </ul>
+      </div>
+      <div>
+        <h3>What it would still take</h3>
+        <ul class="tight">
+          <li>New <b>sequencer logic</b>: fire the shutter on a clock during a 0x49 drive, instead of the move → settle → expose loop. Not a byte patch.</li>
+          <li><b>Mechanical shutter only.</b> The a7R V's sensor reads out slowly, so a moving focus plane under the electronic shutter would smear focus top to bottom.</li>
+          <li><b>Even speed matters.</b> Uneven lens velocity gives uneven slice spacing, which stacks as soft bands.</li>
+          <li>The ceiling is the <b>9-field burst rate.</b> A sweep removes the move overhead; it can't beat the imaging floor.</li>
+        </ul>
+      </div>
+    </div>
+    <p class="note" style="border-top:1px solid var(--line);padding-top:14px"><b>Status.</b> The command bytes are byte-verified in cpapp-b.bin: the 0x43 builder at 0x2CB7E4, the velocity builders at 0x92781E (0x3C) and 0x927848 (0x49), and the speed-scale table at 0x28B364. That movie transitions ride the same 0x49 path, and the exact meaning of 0x1F, are inferred from the decode and still want a lens-protocol log to confirm. Source: notes/glm-focus-drive-protocol.md.</p>
   </section>
 
   <footer>
@@ -479,18 +486,6 @@ function draw() {
   // cursor
   cursor = el("g", { visibility: "hidden" });
   el("line", { x1: 0, x2: 0, y1: 16, y2: AXIS_Y, stroke: "var(--cursor)", "stroke-width": 2 }, cursor);
-  updateTotals();
-}
-
-function updateTotals() {
-  const ms = total * FIELD_MS;
-  document.getElementById("travel-v").textContent = `${travel} field${travel > 1 ? "s" : ""} · ${(travel * FIELD_MS).toFixed(1)} ms`;
-  document.getElementById("settle-v").textContent = `${settle} field${settle > 1 ? "s" : ""} · ${(settle * FIELD_MS).toFixed(1)} ms`;
-  document.getElementById("r-f").textContent = total;
-  document.getElementById("r-ms").textContent = Math.round(ms) + " ms";
-  document.getElementById("r-fps").textContent = (1000 / ms).toFixed(2);
-  document.getElementById("r-d").textContent = "+" + (total - BURST);
-  document.getElementById("warn").hidden = settle >= 4;
 }
 
 /* ---- playback ---- */
@@ -527,14 +522,7 @@ playBtn.addEventListener("click", () => {
 });
 function stopPlay() { if (raf) { cancelAnimationFrame(raf); raf = null; playBtn.textContent = "Play at 1/10 speed"; } }
 
-/* ---- controls ---- */
-const tIn = document.getElementById("travel"), sIn = document.getElementById("settle");
-tIn.addEventListener("input", () => { stopPlay(); travel = +tIn.value; draw(); });
-sIn.addEventListener("input", () => { stopPlay(); settle = +sIn.value; draw(); });
-document.getElementById("reset").addEventListener("click", () => {
-  stopPlay(); tIn.value = 6; sIn.value = 4; travel = 6; settle = 4; draw();
-});
-travel = +tIn.value; settle = +sIn.value;
+/* measured values; the diagram is static */
 draw();
 
 /* ---- why section: 2-second sequence ---- */
@@ -606,5 +594,59 @@ draw();
   el("text", { x: X(30) + 8, y: Y(0.151) + 4, "font-size": 12, "font-weight": 600, style: "fill:var(--img)" }, s).textContent = "Burst, 9 fields";
   el("text", { x: X(30) + 8, y: Y(0.151) + 18, class: "sub" }, s).textContent = "measured to frame 14 only";
   el("text", { x: X(6), y: Y(0.334) - 8, class: "sub" }, s).textContent = "bracket fast zone, 20 fields";
+})();
+
+/* ---- velocity-drive section: step-and-settle vs constant-velocity sweep ---- */
+(function () {
+  const s = document.getElementById("sweep");
+  const W2 = 1000, L2 = 150, R2 = 196, T = 22, B = 212, TMAX = 60, STEPS = 3;
+  s.setAttribute("viewBox", `0 0 ${W2} 272`);
+  const X = f => L2 + f / TMAX * (W2 - L2 - R2);
+  const Y = p => B - p / STEPS * (B - T);
+  // focus-position gridlines
+  for (let p = 0; p <= STEPS; p++) {
+    el("line", { x1: L2, x2: W2 - R2, y1: Y(p), y2: Y(p), stroke: "var(--grid)" }, s);
+    if (p > 0) el("text", { x: L2 - 10, y: Y(p) + 4, "text-anchor": "end", class: "sub" }, s).textContent = "step " + p;
+  }
+  el("text", { x: 0, y: (Y(0) + Y(STEPS)) / 2, class: "sub", transform: `rotate(-90 12 ${(Y(0) + Y(STEPS)) / 2})`, x: 12 }, s).textContent = "focus position";
+  // time axis
+  el("line", { x1: L2, x2: X(TMAX), y1: B, y2: B, stroke: "var(--muted)" }, s);
+  for (let f = 0; f <= TMAX; f += 10) {
+    el("line", { x1: X(f), x2: X(f), y1: B, y2: B + 5, stroke: "var(--muted)" }, s);
+    el("text", { x: X(f), y: B + 19, "text-anchor": "middle", "font-size": 11 }, s).textContent = f;
+    el("text", { x: X(f), y: B + 32, "text-anchor": "middle", class: "sub" }, s).textContent = Math.round(f * FIELD_MS) + " ms";
+  }
+  el("text", { x: X(TMAX / 2), y: B + 48, "text-anchor": "middle", class: "sub" }, s).textContent = "time (VD fields)";
+
+  const path = (d, color, dash) => el("path", { d, fill: "none", stroke: `var(${color})`, "stroke-width": 2.5, "stroke-dasharray": dash || "none", "stroke-linejoin": "round" }, s);
+  // shutter mark: little triangle + tick sitting on the trace
+  const shot = (f, p, color) => {
+    const x = X(f), y = Y(p);
+    el("path", { d: `M${x} ${y - 7} l5 -8 h-10 z`, fill: `var(${color})` }, s);
+    el("circle", { cx: x, cy: y, r: 3, fill: `var(${color})` }, s);
+  };
+
+  // today: step + settle. Each frame = 20 fields: 1 send, 6 travel (ramp), 4 settle + 9 expose (hold). Shoots at field+11.
+  let d = "M" + X(0) + " " + Y(0);
+  for (let i = 0; i < STEPS; i++) {
+    const base = i * 20;
+    d += ` L${X(base + 1)} ${Y(i)} L${X(base + 7)} ${Y(i + 1)} L${X(base + 20)} ${Y(i + 1)}`;
+  }
+  path(d, "--lens");
+  for (let i = 0; i < STEPS; i++) shot(i * 20 + 11, i + 1, "--lens");
+
+  // sweep: constant velocity, reaches step 3 in 3*9 = 27 fields; shoots every 9 fields crossing each step
+  path(`M${X(0)} ${Y(0)} L${X(27)} ${Y(3)}`, "--img");
+  path(`M${X(27)} ${Y(3)} L${X(TMAX)} ${Y(3)}`, "--img", "3 5");
+  for (let k = 1; k <= STEPS; k++) shot(k * 9, k, "--img");
+
+  // labels
+  const lab = (y, color, a, b) => {
+    el("text", { x: W2 - R2 + 10, y: y, "font-size": 12.5, "font-weight": 600, style: `fill:var(${color})` }, s).textContent = a;
+    el("text", { x: W2 - R2 + 10, y: y + 15, class: "sub" }, s).textContent = b;
+  };
+  lab(Y(3) - 2, "--img", "Sweep", "3 frames · 27 fields");
+  lab(Y(2.1), "--lens", "Today", "3 frames · 60 fields");
+  el("text", { x: L2 + 6, y: T - 7, class: "sub" }, s).textContent = "▲ = shutter fires · same 3 focus positions, same focus range";
 })();
 </script>
