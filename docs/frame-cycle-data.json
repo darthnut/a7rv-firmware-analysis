@@ -41,7 +41,7 @@
         "fsm_body": {"file": "0x27D398", "va": "0x385398"},
         "target_calc": {"file": "0x27D2F0", "va": "0x3852F0"},
         "step_table": {"file": "0x27D384", "va": "0x385384"},
-        "send_chain": ["0x91603E", "0x928A86", "0x2C37E4 (BL_MOVE_FC_A trace)"]
+        "send_chain": ["0x91603E", "0x928A86", "0x2CB7E4 (VA 0x3D37E4, BL:MOVE_FC_A trace)"]
       }
     },
     {
