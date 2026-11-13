@@ -88,6 +88,55 @@ of recycle per frame; this bench at `1/200` was low-power, so recycle hid under 
 The decisive test is in *Still to measure* below. ([TESTING.md](TESTING.md) is still
 written around the old 26/36 figures; the numbers here are what firmware 4.00 produced.)
 
+### What the charge-wait actually computes (decoded)
+
+A follow-on pass decoded the `20000`-unit charge-wait itself, to see whether it could
+account for whole fields. It is **not** a direct "wait 20000 ms" — the constant runs
+through a scale-and-divide before it becomes a countdown. The chain, **byte-verified**
+against `cpapp-b.bin` with capstone (VA = file + `0x108000`):
+
+- The wait is emitted at file `0x2214E8` (VA `0x3294E8`): `movw r0,#0x4E20` (= 20000),
+  stored into the wait request, then handed to the wait entry at VA `0xAD9B6C`.
+- The wait entry (VA `0xAD9B6C`) left-shifts the value by 8 and forwards it to a timing
+  core at VA `0x267DF8`.
+- The core multiplies by **1000** (`mov.w r11,#0x3E8; umull …,r11`), shifts right by 8,
+  adds **half the tick-period** (round-to-nearest), then calls a 64-bit divide
+  (`bl 0x606A50`) by a **per-profile tick-period** — the whole sequence appears **twice**
+  (two values from the request). The ×1000 is the classic millisecond→microsecond
+  signature.
+- The tick-period is read from a table at VA `0x2680DC` — `{3560, 3560, 3560, 3560, 889,
+  889}` — selected by a runtime profile byte; the paired cap table at VA `0x2680C0` is
+  `{65535, 65535, 65535, 65535, 262143, 262143}`. Both tables read byte-for-byte.
+
+So the armed count is `(20000 × 1000 + tick_period/2) / tick_period` ≈ **5618** (profile 0,
+period 3560) or ≈ **22497** (profile 4, period 889).
+
+**What this does *not* settle: the wall-clock.** The tick *count* is fixed by the
+verified arithmetic, but the real-time duration turns on the tick-period's **unit**,
+which the code doesn't state:
+
+- if `tick_period` is in **µs**, the hold is ≈ **20 s** (5618 × 3560 µs ≈ 20.0 s) — a
+  plausible flash-capacitor recycle ceiling, and easily enough to add *several* fields
+  at high flash power;
+- if it is in **ns**, the hold is ≈ **20 ms** — about one VD field, below the bench's
+  measurement floor.
+
+Static analysis can't choose between these: there is no unit annotation, and the
+downstream timer write wasn't traced to a known timebase (so the "arms a hardware timer
+vs. spins a sleep" question is also left open — the verified part is the arithmetic, not
+the destination). Both readings are consistent with the decode; they differ by 1000× in
+what they would mean for cadence. The decode therefore **sharpens** the flash-recycle
+hypothesis — the charge path really does arm a scaled, profile-dependent countdown from a
+fixed `20000` constant — without **closing** it. The decisive evidence is still the
+empirical 26-vs-20 test in *Still to measure*: only that shows whether high flash power
+adds the ~6 fields this interlock could supply on the µs reading.
+
+> **Provenance.** This decode was produced with a local LLM (Qwen3.8-27B) driving Ghidra,
+> then every constant and instruction above was **re-verified by hand against the binary
+> with capstone** before being recorded — consistent with this repo's verify-before-record
+> rule. Claims the re-verification could not confirm (notably the timer-write destination)
+> are marked open rather than asserted.
+
 ## Firmware relevance (revised — honest)
 
 Two regimes, two different limiters:
