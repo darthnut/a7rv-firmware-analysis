@@ -1,689 +1,169 @@
 # Sony a7R V — firmware analysis
 
-**Purpose.** An analysis of the Sony a7R V's firmware. The goal is to understand how
-the camera works and to identify potential areas for improvement through firmware
-modification. This is reverse engineering of my own camera, for interoperability and
-understanding — **no Sony firmware is redistributed here**, only byte offsets and
-derived analysis.
+Reverse engineering of the Sony a7R V (ILCE-7RM5) firmware, on **my own camera**, for
+interoperability and understanding. The goal is to map how the camera works and to find
+where — if anywhere — behaviour could be improved through firmware modification.
 
-> **Working ethos.** Map first, measure before modifying, and never present an
-> untested change as a mod to flash. Where an investigation turns up a candidate
-> firmware lever, it's documented as a *hypothesis* with its evidence and its risk,
-> not a recipe. Modifying and flashing camera firmware can permanently brick the
-> device; anything here is acted on only on a body someone is willing to lose, and
-> only once there's a measured reason to.
+**No Sony firmware is redistributed here.** Everything in this repo is derived analysis:
+byte offsets, virtual addresses, struct layouts, protocol fields and mechanism. No key
+material, no license blobs, no credential bytes, and no firmware image or extracted binary
+appears anywhere in it.
 
-## How this is organized
-
-- **Investigations** — each one states what we wanted to improve, what the binary
-  actually shows, and whether there's a firmware lever worth pursuing. The first is
-  below.
-- **[Interactive frame-cycle timeline](https://darthnut.github.io/a7rv-firmware-analysis/docs/frame-cycle.html)**
-  — the per-frame bracket timing diagram and the velocity-drive findings as a viewable
-  page (published via GitHub Pages).
-- **[docs/method.md](docs/method.md)** — shared tooling, the Ghidra setup, the
-  `movw`/`movt` address-resolution trap, and a running address reference.
-- **[docs/patch.md](docs/patch.md)** — detailed risk write-up for the one candidate
-  patch we found.
-- **[TESTING.md](TESTING.md)** / **[RESULTS.md](RESULTS.md)** — empirical protocols
-  and their measured results, because the binary only tells half the story.
-- **[Acknowledgments & prior work](#acknowledgments--prior-work)** — this project did
-  **not** crack the firmware encryption; it builds on community work that did, credited
-  there.
+> **Working ethos.** Map first, measure before modifying, and never present an untested
+> change as a mod to flash. Where an investigation turns up a candidate firmware lever it is
+> documented as a *hypothesis* with its evidence and its risk, not a recipe. Modifying and
+> flashing camera firmware can permanently brick the device; anything here is acted on only on
+> a body someone is willing to lose, and only once there is a measured reason to.
 
 ---
 
-# Investigation 1 — focus-bracket cadence
+## What this is
 
-**The question:** why do some in-camera focus-bracket stacks run slow while others
-run fast? Is the slowdown a settings/flash effect fixable today, something physical,
-or a firmware lever worth pursuing?
+Two threads of work, now written up as one reference:
 
-> **Status — settled.** Two independent lines of evidence now converge: a controlled
-> bench test (cadence measured from EXIF capture timestamps, [RESULTS.md](RESULTS.md))
-> and a complete static reverse-engineering sweep of `cpapp-b.bin` — since extended
-> with a follow-on decode that traced the frame trigger's dispatch sites and located
-> the one camera-side settle constant. **Neither the fast-zone cadence nor the
-> slowdown is meaningfully tunable in camera firmware** (the one located constant buys
-> ≤2–3 fields at real risk; the write cliff has no patchable depth). The honest answer
-> is below.
+1. **Behaviour investigations** — question-driven studies that start from something the camera
+   does (why focus-bracket stacks slow down; what the dormant service mode is) and chase it into
+   the binary until it is settled or the static trail ends.
+2. **A subsystem reference** — 21 static-analysis studies of the a7R V's security, service, IPC,
+   persistence and command subsystems, each verified against the binaries, each carrying its own
+   verification status and static boundary so a reader can tell *solid* from *inferred* from
+   *out-of-image* at a glance.
 
-## TL;DR
+The headline structural finding is a **complete crypto / keystore spine** and a **full service-mode
+chain**, traced end to end up to the point where they leave the extracted firmware:
 
-Focus-bracket cadence has **two regimes, two different limiters — neither one a
-camera-firmware timer:**
-
-- **Short stacks (≤ ~44 frames): paced by focus-step overhead.** A fastest-burst
-  reference (no focus stepping) runs ~**9 VD fields** (0.151 s ≈ 6.6 fps) — the
-  capture+write ceiling. Focus Bracket's fast zone runs ~**20 fields** (0.34 s). The
-  gap, **~11 fields (~0.19 s) per frame, is one serial lens-move cycle the bracket FSM
-  inserts between exposures** — identical tethered vs untethered, flash on vs off. The
-  follow-up decode settles the mechanism precisely (see
-  [*The frame cycle, end to end*](#the-frame-cycle-end-to-end-settling-glms-open-questions)):
-  1 field to compute+send the move, ~6 fields of physical lens travel (polled), a
-  hard-coded **4-field settle** (file `0x27D4B4` — now *located*, correcting the earlier
-  "no settle constant exists" claim), then the unchanged 9-field imaging segment. The
-  bulk is lens physics; the settle is the one camera-side constant.
-- **Long stacks (> ~44 frames): paced by the write-pipeline cliff.** The buffer
-  absorbs ~44 frames at full speed, then cadence collapses to the sustained
-  write/transfer rate. The stall is an SDF develop-resource acquire retry loop whose
-  server now **traces fully into `av-cam.bin`** (the develop subsystem — opened and
-  analyzed; the acquire chain, resource server, and memory manager all live there). The
-  key result: the pool's size is **runtime-configured** (`CdMemMgr` / `SetMemArea`), so
-  the ~44-frame depth is emergent from boot-time byte-capacity vs frame size — there is
-  **no patchable depth constant anywhere**, in `cpapp` or `av-cam`.
-
-The original fast/slow memory maps onto **pre-cliff vs post-cliff** (and onto the
-save path: card-only post-cliff ≈ 36 fields, tethered-to-both ≈ 95–116 fields).
-
-**The one firmware lever we found — a 2-byte relaxation of an STP buffer-full gate —
-is real and verified in the binary, but touches neither the 11-field focus overhead
-nor the write cliff.** It is documented below for completeness, not recommended.
-
-## Background: the VD field quantization
-
-The capture pipeline is clocked by a "VD" scheduler.
-
-- 1 VD field = **500 ticks = 16.6833 ms**.
-- Cadence is quantized to whole fields. Measured points: **9 fields** (burst ceiling),
-  **~20 fields** (focus-bracket fast zone, tethered), **~36 fields** (card-only slow
-  stacks, post-cliff), **~95–116 fields** (tethered-to-both, post-cliff).
-
-Because cadence is quantized, the differences are discrete field counts, not smeared
-timing — which is what let the bench test and the disassembly line up frame-for-frame.
-
-## What paces it — the decomposition
-
-Measured on the bench (see [RESULTS.md](RESULTS.md)), then cross-checked against the
-binary:
-
-| regime | cadence | what limits it | firmware lever? |
-|---|---|---|---|
-| burst, no focus step | **9 fields** (0.151 s) | capture + write ceiling | n/a (this is the floor) |
-| focus-bracket, fast zone (≤~44 frames) | **20 fields** (0.34 s) | **serial lens-move cycle** (~11 fields: 1 send + ~6 travel + 4 settle) on top of capture | settle constant exists (`0x27D4B4`) but buys ≤2–3 fields at real risk; travel is lens physics |
-| focus-bracket, past the cliff | 36–116 fields | **write pipeline** at buffer-full | in `av-cam.bin` (develop subsystem) — runtime-configured, **no static constant** |
-
-The ~11-field focus-step overhead decomposes (superseding the earlier bounds guess)
-as: **1 field** to compute+send the move, **~6 fields** of lens physical travel
-(lens- and width-dependent), and **4 fields of hard-coded camera-side settle** —
-event hops contribute ~0 (GetSendTiming's window is µs-scale, not field-scale). The
-only camera-side time constants in the path: that settle and the 60-field abort cap.
-
-## Static analysis — what is, and isn't, in `cpapp`
-
-A full sweep of the focus-bracket and capture paths in `cpapp-b.bin` (Ghidra, ~1,300
-decompiled sequencer functions) established these, each grounded in the binary with
-offsets and decompiled evidence:
-
-- **The focus-step calculator** is at file `0x27D2F0` / VA `0x3852F0`. Per-frame lens
-  target = start/last position ± step, where
-  `step = TABLE[idx] × (lens_ctx[0xE] >> 1) × dir`, clamped to the lens near/far
-  limits. The **step table** is at file `0x27D384` / VA `0x385384`: 10 × u16,
-  `{32, 42, 53, 64, 74, 85, 96, 106, 117, 128}` (verified byte-for-byte). The menu
-  "Focus Step Width" selects where on this ramp a run operates — so a larger width is
-  a **larger physical move per frame, not a longer delay.**
-- **Zero kernel-sleep calls** (the `FUN_005CAAFC` sleep primitive) exist anywhere in
-  the decompiled sequencer set — the *bracket* overhead is not a sleep-based delay. But
-  the follow-up decode (below) **did locate one hard-coded camera-side wait**: a fixed
-  **4-field settle** in the bracket FSM (state 2), byte-verified at file `0x27D4B4`
-  (`cmp r0,#4`, bytes `04 28`). The earlier "no settle constant exists" claim is
-  superseded: there is no *sleep-based* delay, but there *is* a poll-count settle.
-  Details in the frame-cycle subsection below.
-- **The write cliff's stall shape** is an SDF develop-resource acquire retry loop —
-  `ModuleRcBase::ExecRcAcquire`, file `0x3484F0` / VA `0x4504F0`: the acquire returns
-  `0x80` (busy) and the loop retries up to 100 times. That chain now **traces fully into
-  `av-cam.bin`** (10,654 functions, opened and analyzed): the server-side `ExecRcAcquire`
-  (`FUN_01058430`) → `rcct_Acquire` → `RcDriver::AcquireSeqCtrl`, which walks four
-  exec-ctrl objects — any busy returns the `0x80` the `cpapp` client sees. The memory
-  behind them (`CdMemMgr`) is **configured at runtime** (`SetMemArea_ENC/DEC`), so the
-  ~44-frame depth is emergent from boot-time byte-capacity — **not a static constant**,
-  in `cpapp` or `av-cam`.
-
-## The frame cycle, end to end (settling GLM's open questions)
-
-A follow-on pass (this investigation) resolved the remaining open questions in the
-lens-timing decode — where the frame trigger is dispatched from, why nothing overlaps,
-and the exact camera-side floor. This is the per-frame timeline a visualization should
-draw. All offsets are `cpapp-b.bin` file offsets (VA = file + `0x108000`); all
-constants byte-verified with capstone.
-
-### One bracket frame ≈ 20 VD fields (0.34 s), fully serial
-
-| # | Stage | Fields (typ.) | Bound | What happens | Code anchor (file) |
-|---|---|---|---|---|---|
-| 0 | **Frame kick** | (in-stage) | — | After the *previous* frame's readout, the still-execute pipeline enters its capture-init stage (`Stg>CapInit` / `Stg>CapInitLv` trace strings), packs the per-frame request, and calls the bracket trigger: request(`0x8594A8`) + kick(`0x859504`) → the FSM's pending-kick flag. The trigger also emits an event whose handler sets flag byte `0x0158829A`. | stage bodies file `0x36EBDC` (VA `0x47EBDC`, call site VA `0x47EED2`) and file `0x363BD8` (VA `0x473BD8`, call site VA `0x473E52`); trigger `0x85BA62` |
-| 1 | **FSM state 0 — compute + send** | 1 | exactly 1 per invocation | Target = `step_table[idx] × lens scaling` (see calculator above), clamped; sent as one `MOVE_FC_A` (cmd `0x43`) lens command, **fixed drive profile 0**; first move of a sequence sets the sequence-start bit, mid-sequence doesn't | FSM body `0x27D398` (VA `0x385398`), case 0; target calc `0x27D2F0`; send chain `0x91603E` → `0x928A86` → payload builder `0x2CB7E4` (VA `0x3D37E4`, trace `BL:MOVE_FC_A`) |
-| 2 | **FSM state 1 — lens travel wait** | ~6 (bench-derived; lens- and width-dependent) | 1–60 (abort cap) | Polls the *camera-generic* move-done gate once per field: `!0x019CC125` **and** cmd-0x1D completion bit **and** cmd-0x43 move-state (else encoder convergence within ±126 units) **and** `0x019CC126==0` | case 1; poll `0x9160FA`; timeout `cmp r0,#0x3C` @ `0x27D48C` (bytes `3c 28`) |
-| 3 | **FSM state 2 — fixed settle** | **4 (exact)** | exactly 4 | A hard-coded poll counter must reach 4 before the focus-window validation runs; this is the **one camera-side time constant** in the move path | case 2; settle `cmp r0,#4` @ **`0x27D4B4`** (bytes `04 28`); window check vs lens range `[+0xA8..+0xB4]`; retry cap `cmp r0,#0xB` @ `0x27D55A` (≤12 attempts, then abort state 4) |
-| 4 | **FSM state 3 — parked / exposure** | ~9 | ≥9 (imaging) | FSM idles; the stage pipeline arms and runs the exposure + readout — the same 9-field segment a plain burst frame costs. The next kick only comes from the *next* frame's capture-init. | case 3 (empty body); exposure arm on the `EC_ExpWait`/`SetupCap` path (container B) |
-
-**Why bracket runs at ~20 fields while bursts run at 9:** the move cycle (states 0–2,
-~11 fields) is inserted *between* imaging cycles, and the exposure stage cannot arm
-until the FSM parks in state 3. There is no overlap path in the code — the kick site
-lives in the next frame's capture-init stage and the settle gate precedes the park.
-The bench's exact 20 (= ~11 move-side + 9 imaging) confirms the two halves are
-strictly additive with no hidden idle.
-
-**Camera-side floor:** with an idealized zero-travel lens, states 0+2 cost 1+4 = 5
-fields plus at least one poll-tick for state 1 → ~6 fields of body-fixed overhead, so
-even a magic lens could not beat ~15 fields (4 fps) for this drive profile. The only
-camera-side time constants in the whole path: the **4-field settle** (`0x27D4B4`) and
-the 60-field abort cap (`0x27D48C`). Travel time (state 1) is lens physics.
-
-**Drive-profile note:** all five public `MOVE_FC_A` send variants (family
-`0x928A86`–`0x928CBC`) pass fixed literals for the drive/flag bytes; the bracket path
-uses the plain variant (drive 0). No bracket-specific fast/slow drive selection exists
-in `cpapp`; whether the lens interprets those bytes as motor speed is lens-side (OPEN).
-
-## The one lever we found: the STP buffer-full gate (real, but low-value)
-
-Function at **file offset `0x4196B4`** (Ghidra VA `0x5216B4`; load base `0x108000`,
-so VA = file offset + `0x108000`). The relevant branch:
-
-```c
-if (param_2 == 4) {
-    if (DAT_019d22c0 != '\0') {            // sticky "already full" flag -> bail
-        return;
-    }
-    if (DAT_0115e994 < iVar1 * 2 + 0x28U) {   // need = 0x28 + 2*r   (THE GATE)
-        iVar1 = FUN_005fe578(auStack_114, 0xec,
-                             s__STP_ERROR___BUFFER_FULL____00521798);
-        DAT_019d22c0 = '\x01';             // latch full
-    }
-    DAT_0115e994 = DAT_0115e994 + (-0x14 - iVar1);   // consume = 0x14 + r
-}
-FUN_00b6c2f2(param_2, &uStack_128, iVar1 + 0x14);    // send msg of (r + 0x14) bytes
-if (DAT_019d22c0 == '\x01') {
-    DAT_0119424a = '\0';                   // disable this whole path once full
-}
-```
-
-- **Availability check** demands `need = 0x28 + 2·r`; **actual consumption** is
-  `consume = 0x14 + r` — roughly **2× headroom**, pure policy slack.
-- **Pool counter** `DAT_0115E994` initializes to **16364 (≈16 KB)**; xref analysis
-  (95k resolved `movw`/`movt` refs) shows **only this gate** touches it. It is a
-  **~16 KB request-*message* staging pool, not image data** — it literally logs
-  `[STP_ERROR]: BUFFER FULL!!!` and latches trace off when full.
-
-> **Cross-processor closure (the "missing replenisher").** Earlier passes noted that
-> this gate only ever *decrements* the counter — the matching replenish was never
-> visible in `cpapp`, so the accounting looked one-sided. The likely reason is that the
-> counter is balanced from the **other processor.** The gate sends into a shared UIPC
-> queue (`0x8F013A`); on the a15 Linux side, `sen.elf`'s log forwarder
-> (`FUN_004021A4`) posts `{type 2, id 0x3D}` into that **same** queue — and `0x8F013A`
-> is referenced on both the cpapp and the a15 sides. So the STP pool looks like a
-> **cross-processor** structure (cpapp ↔ a15), which would explain why the balancing
-> write is invisible to `cpapp`-only analysis. **We did not observe the a15-side write to
-> the counter itself** — this is strong circumstantial evidence, not a located writer.
-> (The a15 side is mapped in
-> [Investigation 2](#investigation-2--other-customization-surfaces).)
-
-**The candidate patch** relaxes the 2× headroom to 1×:
-
-| file offset | before | after | instruction change |
-|---|---|---|---|
-| `0x41973E` | `28` | `14` | `movs r1,#0x28` → `movs r1,#0x14` |
-| `0x419746` | `40` | `00` | `add.w r2,r1,r0,lsl#1` → `add.w r2,r1,r0` |
-
-Two bytes, re-disassembled before/after with capstone; original bytes confirmed in
-the shipping `cpapp-b.bin`. See [docs/patch.md](docs/patch.md) for the risk write-up.
-
-> ### ⚠ Why this isn't the answer.
-> The bench test and the static sweep agree that this gate guards a trace/request
-> message pool that is **distinct from the SDF/develop path governing the ~44-frame
-> write cliff**, and it has nothing to do with the physical focus-step overhead that
-> paces the short stacks actually shot. It is a real, verified lever that moves
-> neither of the two things that actually pace focus bracketing. Do not treat it as a
-> mod to flash.
-
-## Lever table (final)
-
-| candidate lever | where | verdict |
-|---|---|---|
-| STP message-gate 2×→1× headroom | file `0x41973E`/`0x419746` | **real, verified — but low-value**; touches neither the 11-field overhead nor the write cliff |
-| focus-step settle constant | file `0x27D4B4` | **now located** (follow-up decode): a hard 4-field settle counter in FSM state 2, bytes `04 28`, **one-byte patchable** — but buys ≤2–3 fields (~50 ms/frame) and the settle exists to let the lens/focus-window check see a still image; trimming it risks window-check retries (≤12 budget) and soft-focus frames. High-risk, small reward. |
-| bracket move drive profile | family `0x928A86`–`0x928CBC` | bracket uses the plain fixed profile (drive 0); no faster profile is *selected* anywhere in `cpapp`. Whether a faster profile exists is lens-side (OPEN) — not reachable from the camera binary alone. |
-| step-width table shrink | file `0x27D384` | works, but it's the **existing menu setting** by another name (pure geometry — smaller moves, but more frames for the same depth) |
-| VD comm-window margins | file `0x3B5C26`/`0x9EEA46` | **refuted as a field-scale cost** by the ns-reading of GetSendTiming (2 µs margins) — no longer a candidate |
-| move/exposure overlap | — | **structurally absent**: the kick is issued from the *next* frame's capture-init and the settle gate precedes the FSM park that the exposure stage waits on; no overlap path exists to patch short of restructuring the sequencer |
-| write-cliff buffer depth | — | **in `av-cam.bin`** (develop subsystem, verified) — runtime-configured (`CdMemMgr`/`SetMemArea`), **no patchable constant** |
-
-## Practical takeaways (no firmware needed)
-
-- **Keep stacks ≤ ~44 frames** to stay in the fast zone; deep stacks hit the write
-  wall.
-- To go faster in the fast zone, the real levers are physical: a **smaller focus-step
-  width** (shorter lens moves) or a **faster-focusing lens** — the camera firmware has
-  no delay to trim there.
-- To push the cliff later / raise the post-cliff rate: **compressed / lossless RAW**
-  (smaller files), a **faster card**, and a lighter save path (card-only beats
-  tethered-to-both). These are measured next steps, not firmware.
-
-## Where this could still go (outside `cpapp`)
-
-The two avenues this analysis couldn't reach from `cpapp` alone:
-
-1. **`av-cam.bin` (the develop subsystem) — since analyzed; resolved.** The ~44-frame
-   write-buffer pool *is* managed here (the SDF resource server + `CdMemMgr`), as
-   suspected — but its size is **runtime-configured**, with **no tunable depth
-   constant**, so there is nothing to patch. This avenue is now closed.
-2. **Dynamic instrumentation.** Splitting the ~11-field focus overhead empirically
-   into lens-move vs comm-hop vs settle (e.g. via the firmware's own `ImagerSeqLog`)
-   would confirm the static split — and with the trigger dispatch now traced and the
-   settle constant located, a single logged run at two step widths would nail the
-   travel-vs-settle boundary the visualization can't resolve from statics alone.
+- **At rest:** application data → **SecVault** (AES-256-GCM, per-record random data key) → **Backup
+  store** → backup daemon. The data key is wrapped by a key-encryption key held in an **out-of-image
+  key service** (OSAL QID `0x25906be`); the master key is provider-side / hardware-rooted and never
+  enters any extracted image. Confidentiality of everything at rest reduces to that one key.
+- **Service mode:** a 3-level SHA-256 challenge-response (`libsencore.so`) → a runtime verb
+  dispatcher → SSH provisioning (`libInfraSSHManager.so` starts `sshd`, sets a `crypt(3)` `$5$`
+  login, persists an ECDSA host key through the Backup store). The auth is prior public work
+  (`ma1co` / Sony-PMCA-RE); this repo re-derives and credits it and adds the Gen5 deltas.
 
 ---
 
-# Investigation 2 — other customization surfaces
+## Architecture at a glance
 
-**The question:** with the cadence question settled, where *else* in the firmware is
-there room to customize or improve the camera? This is a breadth-first **map**, not a
-set of mods — each surface is recorded with what the binary shows and how hard it
-would actually be to do anything with it. Nothing here is pursued to a working change.
+- **Two processors.** A main **SoC / BIONZ XR** side running the camera application
+  (`cpapp-b.bin`) and the develop/imaging pipeline (`av-cam.bin`), and an **a15 AArch64 Linux**
+  side (the `fs/a15` userland: ~352 shared objects, ~75 service ELFs) that owns USB, networking,
+  SSH, the service channel and the crypto/keystore.
+- **One message fabric.** Everything is wired together by **OSAL / UIPC** over `/dev/uipc`, a
+  QID-addressed message bus. Key QIDs: `0x25906be` (crypto key service), `0x82cd08e0` (Backup
+  domain), `0x3d032e` (SENSER power), `0x8f013a` (log sink).
+- **Security spine.** SecVault + key service + Backup store at rest; SENSER auth → verb dispatch →
+  SSH for the service channel; HASP as a check-in log, not a feature gate.
 
-## TL;DR
+Full picture: **[ARCHITECTURE.md](ARCHITECTURE.md)**.
 
-Five surfaces surveyed in `cpapp-b.bin` and the a15 Linux partition. The most
-interesting is a **dormant factory service stack**; the rest are reference material or
-dead ends.
+---
 
-- **Dormant SSH / service stack (a15) — decoded, then found to be prior art.** The camera
-  ships, unused, a full SSH service — `sbin/sshd`, a host-key generator, and
-  `libInfraSSHManager.so` (`network::InfraSshManager`). The boot chain is mapped:
-  `bin/im.elf` (power/boot manager, `C3P_PACKET` inter-process protocol) →
-  `bin/sen.elf` (SENSER core v1.3.4, reads a numeric "smode" from a cascade of
-  `/boot`, `/setting`, `/var` paths) → service stack. The factory service-mode gate is
-  mapped end to end: a numeric "smode", a USB command channel, and a **three-level
-  SHA-256 challenge-response** whose keys are **static 512-byte secrets embedded in a
-  shipped library**; completing it lets the connected tool provision the `sshd` login.
-  Full chain, offsets, and the security implication are in
-  [the subsection below](#the-service-mode-authentication-decoded). *The earlier
-  "HASP token" framing was wrong — `/setting/.hasp` is a session audit log, not the
-  gate. And the whole mechanism turned out to be `ma1co`'s prior public work — see the
-  credit note under the decode; the key bytes are not reproduced here either way.*
-- **Command-dispatcher catalog — 288 commands mapped.** Every internal
-  `SET_` / `PID_SET_` / `PUSH_` command was paired with its handler offset and log
-  string (e.g. imager-mode, power-save, and drive commands). This is a reference for
-  any future tether/remote work. Note: the **external** exposure layer (PTP / the
-  Creators' App remote API) is **not** in `cpapp` — no PTP strings there; it lives in
-  the USB-gadget / network daemons on a15, unanalyzed. The full catalog is committed as
-  [`docs/command-table.txt`](docs/command-table.txt) — 306 FW commands + 102 property
-  handlers with handler/checker offsets and names (offsets only, no firmware bytes).
-- **`ImagerSeqLog` — the camera's own timing instrument.** The sequence logger that
-  would let us split the ~11-field focus overhead empirically (see Investigation 1's
-  open items) was located: log sites call a trace-category gate (`0x278B8C`, channel
-  `0x1C`) into an ARM-side category registry, writing `{id, payload, u64 timestamp}`
-  on the same kernel timebase. **Enabling a category is a service/debug action — almost
-  certainly the same gated service stack above.** So the diagnostic win and the SSH
-  surface are the same lock.
-- **PowerSave handler** (`0x27C144` / VA `0x384144`). Imager power sequencing mapped —
-  sensor-drive register writes and training waits. This is **frame-to-frame imager
-  sleep logic, not the thermal-limit table**; the thermal constants remain unfound.
-- **Cosmetic / flags — nothing actionable.** `SysSound.bin` is a packed sound bank
-  (no plaintext, format RE needed before any replacement). A `debug_mode` string that
-  looked promising was run down and **closed**: it's a field name inside a VD-drive
-  register-dump format, not a global debug switch.
+## Where to find what
 
-**Bottom line.** The one surface with real leverage (SSH / service access, which would
-also unlock the `ImagerSeqLog` diagnostics) is gated by a factory-tool
-challenge-response, not a config flag — and that gate is now fully mapped (below). Its
-entire strength rests on three static keys baked into a shipped library, so it is "only
-as secret as the firmware encryption." A first **observe-only** hardware session has since
-completed this challenge-response on an owned body — the decode works live, no writes
-issued — and found the raw memory-dump verb locked (`0x80`); see
-[First hardware session](#first-hardware-session-the-gate-completes-the-dump-verb-is-locked-observe-only)
-below.
-
-## The service-mode authentication, decoded
-
-> **Prior art — credit to `ma1co` / Sony-PMCA-RE.** After mapping this ourselves, we
-> found the whole thing had **already been reverse-engineered and published** years ago
-> by `ma1co` in [Sony-PMCA-RE](https://github.com/ma1co/Sony-PMCA-RE): the SENSER
-> protocol, the challenge-response, and the keys. Cross-checking confirmed the a7R V
-> runs the **same system with the same keys, unrotated** — the keys we extracted match
-> `senserKeysSha256` in that public repo byte-for-byte, and a working reference client
-> already exists there. **So the decode below is a re-derivation of known work, credited
-> to `ma1co`,** not an original discovery of this project. The little that does look
-> specific to the a7R V is collected under
-> [What's actually new for the a7R V](#whats-actually-new-for-the-a7r-v) at the end of
-> this investigation.
-
-All offsets in this subsection are in the **a15 Linux ELF libraries**
-(`libsencore.so`, `sen.elf`, `libInfraSSHManager.so`), not in `cpapp` — a different
-address space from Investigation 1's load base. Everything here is read-only static
-analysis (Ghidra, symbols from `.dynsym`). **The actual key bytes are not reproduced**
-— only their offsets and the verification mechanism, consistent with this repo's
-no-redistribution line.
-
-**1. Service mode (`smode`).** `sen.elf` persists a one-byte mode in a `/boot` →
-`/setting` → `/var/.sen/.smode` cascade. `FUN_004028D0` matches it against a
-one-entry string table (`key 1 → "UU"`): on a match it writes the literal string
-`"UU"` into the smode file (service mode ON); anything else removes the file (OFF).
-Startup mirrors the byte to `/var/.sen/.smode` and logs `SENSER_MODE = %d`.
-
-**2. The USB service channel.** `SenserIfStart` → `Usb::open_channel()` →
-`InitiationDispatcher::register_handler()` brings up an event-driven USB command
-channel (`CORE_START MODE:SENSER`). The protocol worker is `NinThread`
-(`libsencore.so` @ `0x10BBFC`), framing fixed `0x204`-byte packets dispatched by
-`CmdDecode`.
-
-**3. The three-level challenge-response ladder.** `CmdDecode` command ids:
-
-| cmd | verb | effect |
-|---|---|---|
-| 1 | `HOP` (`xxhop`) | hello / handshake start |
-| 3 | `STEP` (`xxstep`) → `JUMP` | **challenge-response**; on success `level++` (1→2→3, wraps) |
-| 5 / 7 | `KICK` (`xxkick`) | authenticated command executor; then `tlog_set_hasp(id)` |
-| — | unknown | `NIN_THREAD_ERR_UNKNOWN_CMD` |
-
-`xxstep` (`libsencore.so` @ `0x115C1C`) verifies `SHA256(challenge[512] ‖ key[512])`
-by `memcmp` against the tool's response. There is **one 512-byte static key per
-level**, embedded in `libsencore.so`:
-
-| level | key offset (`libsencore.so`) |
+| You want… | Go to |
 |---|---|
-| 1 | `0x1570D8` |
-| 2 | `0x156ED8` |
-| 3 | `0x156CD8` |
-
-On reaching **level 3** the service creates `/ramdsk/dev` and writes `"AA\0"` to
-`/ramdsk/dev/mode` — a live-session marker other subsystems honour (a candidate
-trigger for the `av-cam` `debug=1` paths, and so plausibly for `ImagerSeqLog`). It is
-removed on session end. `xxstep2` (`0x116058`) is a parallel re-auth variant for cmd
-ids 9/10.
-
-**4. From authenticated session to SSH.** Once the ladder is cleared, the service
-command set includes `network::InfraSshManager::PasswordManagerImpl::updatePasswordFile`
-(`libInfraSSHManager.so` @ `0x108318`), which writes `name + sep + password` (len
-< 0x65) under `flock` to `/tmp_network/ssh/ssh_name_password`. In other words, **the
-party that completes the handshake sets the `sshd` login** — this is how the factory
-tool enables SSH.
-
-**5. `/setting/.hasp` is an audit log, not a gate** (correcting the Investigation 2
-TL;DR's earlier framing). It is an 88-byte, 10-entry ring of
-`{u16 tool-id, 6-byte BCD timestamp}`; `Regist_HaspId` appends the current session and
-**returns success when the file is absent**. "Hasp last_histroy data error" means a
-corrupt log, not an auth failure. It records *who connected*, it does not decide
-*whether* they may.
-
-**6. Related service surface.** Beyond USB there is an **adjustment-command channel**
-with no USB needed: `sens_adjCmd_init` registers an OSAL UIPC callback on queue
-`0x3D025F` → dispatcher `FUN_00112630`. Named verbs there include `cmd 0x14`
-(mode-file ops on `/mode` ↔ `/tmode`) and **log extraction** (op 4:
-`/log/ulogio_klog.txt`, `/log/ulogio_tlog.txt`, `/log/escapelog.bin`), alongside
-factory sensor-adjustment handlers that pair with `a15/bin/adjstctl.elf`. The real
-post-auth verb table, however, is **runtime-registered** (a `PacketData` factory
-vector at `DAT_0016CA08`), so the individual command ids are **not statically
-enumerable** without execution.
-
-**Security finding.** The factory-tool authentication is a set of **hardcoded,
-shared, static secrets shipped inside the firmware** — not per-device key material and
-not a hardware dongle. Its confidentiality rests entirely on the assumption that "the
-firmware is encrypted," which is the very assumption this class of project (community
-RE of Sony updater crypto) already defeats. The access vector is **physical USB to the
-camera**, and nothing here has been exercised on hardware; it is documented as a
-mapped design weakness.
-
-## Cross-validation against Sony-PMCA-RE
-
-The a7R V's SENSER stack was checked directly against `ma1co`'s public reference client
-([`Sony-PMCA-RE`](https://github.com/ma1co/Sony-PMCA-RE)), which implements this exact
-system. Three results:
-
-- **Keys — byte-identical.** The three 512-byte auth keys extracted from the a7R V's
-  `libsencore.so` match `constants.senserKeysSha256` in the public repo byte-for-byte.
-  Sony did **not** rotate the SENSER keys into Gen5 (confirmatory — nothing new, but it
-  anchors everything else).
-- **Auth wire format — matches their client.** The handshake decoded here lines up with
-  `Sony-PMCA-RE`'s `SonySenserAuthDevice`: a big-endian `{u16 cmd, u16 salt, 512-B data}`
-  packet with the command sent *inverted*; `HOP` (cmd 1) → `STEP` (cmd 3,
-  `SHA256(challenge ‖ key[level])`) → `JUMP`, three levels, then `KICK` (cmd 5) executes.
-- **USB identity — a split.** The a7R V updater-mode PID (`0x03E2`, read from the updater
-  UDID) is **already** in their `sony.py`. The senser-mode PIDs and vendor requests we
-  noted earlier (`0x02a9`/`0x0336`, `0x37ff`/`0xd7aa`) are **their generic constants**,
-  *not* values from a7R V firmware — and the a7R V's *actual* senser-mode VID/PID is
-  **provisioned at runtime** (kernel gadget `usbg_sen.ko`, no static descriptor), so it
-  can't be read from the image and would need hardware to confirm.
-
-Net: the a7R V reuses ma1co's SENSER system essentially unchanged; what is genuinely new
-is narrow (see [What's actually new for the a7R V](#whats-actually-new-for-the-a7r-v)).
-
-## The command surface, and an open route for others
-
-A later pass mapped the camera's internal command table and assessed what actually
-*using* the service channel would take. Both are recorded as findings; the second is
-deliberately left as a direction, not a tool.
-
-**Command table (static).** The firmware command-dispatch table was located in `cpapp`
-(region `0xFF6E4C`–`0xFF8FE4`), 20-byte entries of
-`{u16 id, handler fn, flags, checker fn}`:
-
-- **306 FW commands** (id families `0x40xx` / `0x41xx`, ASCII `@`/`A`) — e.g. `0x4152`
-  (`"AR"`) is the verified `SET_FOCUS_BRK_EXEC_STATE`, the focus-bracket trigger from
-  Investigation 1.
-- **102 property handlers** (`0x78xxxx`) — the GET/query layer.
-- As everywhere else in this firmware, **nothing references the table statically**:
-  commands are matched by id and dispatched through the runtime-registered path, so the
-  individual verb *semantics* are not recoverable without running the code. The full id
-  list is committed as [`docs/command-table.txt`](docs/command-table.txt) (ids + handler/
-  checker offsets + names, no firmware bytes).
-
-**The connection route — not new ground.** Reading *live* internal state means a client
-that completes the handshake and reads responses back — and that client already exists:
-`ma1co`'s [Sony-PMCA-RE](https://github.com/ma1co/Sony-PMCA-RE) is a public, working
-implementation of this exact SENSER system, which (per the credit note above) the a7R V
-reuses with the same keys. This repo doesn't duplicate it. That extension
-already exists — [`masterflai/pmca-re-reloaded`](https://github.com/masterflai/pmca-re-reloaded)
-ports the SENSER system with USB transport, Windows drivers and a service shell — and a
-first **observe-only** session on an owned a7R V has now been run with it (see
-[First hardware session](#first-hardware-session-the-gate-completes-the-dump-verb-is-locked-observe-only)):
-the extracted keys authenticate and the channel is live, though the raw memory-dump verb
-came back locked. This project's own `senproto.py` stays a reference codec that has only
-passed an offline selftest. (Emulation
-was assessed as a safer verifier — `ma1co`'s OpenMemories-QEMU — but it models older
-Sony SoCs; bringing up the a7R V's CXD90057 / BIONZ XR would be a substantial project of
-its own, so hardware remains the only practical check.)
-
-The real caution is **not** secrecy — the keys and protocol are public — but the
-**device**:
-
-- **"Read-only" can't be guaranteed in this mode.** The post-auth verb surface includes
-  arbitrary memory write, a terminal shell, and factory **calibration/adjustment**
-  control: this is the manufacturing interface, not a developer sandbox. A wrong command
-  can alter sensor calibration or brick the body, with no user-level recovery.
-- The verb table is registered at runtime, so its full command set isn't recoverable
-  from static analysis — all the more reason to **observe-first** (enumerate and read
-  before issuing anything that writes), and only ever on **a camera you own and are
-  prepared to lose**.
-
-## First hardware session: the gate completes, the dump verb is locked (observe-only)
-
-Everything above was static analysis plus an offline self-test. A first **observe-only**
-session has since been run on an **owned** a7R V (ILCE-7RM5, firmware 4.00) using
-[`masterflai/pmca-re-reloaded`](https://github.com/masterflai/pmca-re-reloaded) — a
-maintained Rust port of `ma1co`'s `Sony-PMCA-RE` with USB transport, Windows drivers and a
-service shell. **No writes were issued**, and the camera was verified healthy afterward.
-Two results:
-
-- **The decoded gate completes on real hardware.** The three 512-byte SHA-256 keys lifted
-  from this body's own `libsencore.so` authenticate: the handshake runs in **SHA-256 mode**
-  (`HOP` → `STEP`×3 → `KICK`) and reaches the service prompt. That promotes the auth decode
-  above from a static map to behaviour **confirmed on a live body** — observe-only, nothing
-  written. Read-only identity/backup verbs (`info`, the 88-byte `HASP` audit block, the
-  settings-backup image) returned valid data, confirming the channel is live. Device-specific
-  contents are **not** reproduced here.
-- **The raw memory-dump verb is locked on this body.** The SENSER *MemoryDump* verb
-  (`pFunc 0xff03`; flat `{u32 base, u32 size}` payload, packet-header micon/offset selectors
-  `0`) returned camera result code **`0x80`** for **every** address tried — `0x0`, and the
-  `cpapp` VAs `0x108000` / `0x385598` / `0x115E994` — at sizes `0x10` through `0x200`
-  (aligned). It is **not** a size/alignment artifact: the `0x200`-aligned `0x108000` read and
-  the `0x0` read both failed. As driven with the default selectors, the verb exposes **no
-  memory** on a7R V fw 4.00.
-
-  *Why* it refuses isn't settled from this alone. Dispatch here is runtime-registered —
-  handlers self-register and there's no static `0xff03` handler in the a15 exports — so the
-  verb may simply be **unregistered** on this body, or permission-gated. It is also
-  **consistent with** the two-processor split (SENSER on the **a15 / Linux** core, `cpapp` on
-  the **separate main core**), under which an a15-side dump verb would have no line of sight
-  to `cpapp` addresses at all — but that is a plausible reading, **not proven here**. Either
-  way, reading `cpapp` memory live would have to bridge through the a15 (its debug terminal →
-  `/proc/iomem` / `devmem`), which would also settle the address-visibility question — and
-  **enabling that terminal is itself a write** (the shell flags `term` as a write op), so it
-  was out of scope for an observe-only run.
-
-Scope caveat: one body, one firmware, default packet selectors. A non-zero micon/offset
-selector, or a different firmware, could behave differently; this records what fw 4.00
-returned, read-only.
-
-## What's actually new for the a7R V
-
-Setting aside everything `ma1co` already published, the genuinely a7R V-specific
-findings here are modest — and **anything touching the live device is unverified beyond
-the one observe-only session above** (no writes; a single body / firmware):
-
-- **The SENSER keys are unrotated into Gen5 / BIONZ XR.** The a7R V (ILCE-7RM5) takes
-  the same `senserKeysSha256` values as earlier bodies — a confirmation that Sony never
-  rotated them, not a code change.
-- **`MSS` start / stop (`0x920202` / `0x920203`) — decoded.** Not in the PMCA-RE map;
-  it's a *relay*, posting a 4-word sync message to UIPC queue `0x80924220` for another
-  subsystem to consume (not a local service). The consumer isn't in the `cpapp` image.
-- **The C3P / UIPC fabric behind the gate** — the shared cross-processor queue, the
-  adjustment channel (`0x3D025F`) with its log-pull verbs, and the `UU` / `AA` mode
-  files — mapped with offsets (see Investigation 2, and the `cpapp` closure in
-  Investigation 1).
-- **USB identity isn't statically recoverable.** The a7R V's senser-mode VID/PID is
-  provisioned at runtime by a kernel USB gadget (`usbg_sen.ko`), with no static
-  descriptor in the image — so static analysis **cannot** supply the camera's device
-  identity, and confirming it needs hardware. (The updater-mode PID `0x03E2` is already
-  known upstream.)
-- **The `PacketData` verb registry is built at runtime**, so its command ids aren't
-  recoverable statically — live enumeration only.
-- Separately, the focus-bracket cadence work (Investigation 1) is original to this
-  project and unrelated to PMCA.
-
-That is the honest scope of what could go upstream: mostly **documentation** of the
-Gen5 service stack and the updater container layout (see Investigation 3), plus the
-deltas above — with the USB identity and the runtime verb table left for hardware.
+| The firmware's shape — images, binaries, IPC, boot, security at a glance | **[ARCHITECTURE.md](ARCHITECTURE.md)** |
+| The narrative studies (question → binary → answer) | **[investigations/](investigations/)** |
+| &nbsp;&nbsp;· Why focus-bracket cadence drops after ~44 frames | [investigations/01-focus-bracket-cadence.md](investigations/01-focus-bracket-cadence.md) |
+| &nbsp;&nbsp;· Service mode, the SHA-256 auth decode, the observe-only hardware session | [investigations/02-service-mode-and-auth.md](investigations/02-service-mode-and-auth.md) |
+| &nbsp;&nbsp;· Why the a7R VI firmware is blocked | [investigations/03-a7rvi-blocked.md](investigations/03-a7rvi-blocked.md) |
+| &nbsp;&nbsp;· The security architecture, synthesised | [investigations/04-security-architecture.md](investigations/04-security-architecture.md) |
+| The subsystem reference — one curated page per subsystem | **[findings/](findings/)** |
+| &nbsp;&nbsp;· crypto / keystore · service mode · transport · command surface · persistence · behaviour | [findings/README.md](findings/README.md) |
+| How any of this was done, and what deep / light / hypothesis mean | **[method/](method/README.md)** |
+| The open frontier, prioritised, each with its static boundary | **[OPEN-QUESTIONS.md](OPEN-QUESTIONS.md)** |
+| Raw data to reuse — the command catalog, the frame-cycle data | **[reference/](reference/README.md)** |
+| The raw run archive (provenance for every finding) | **[framework-runs/](framework-runs/)** |
+| Empirical test protocol / measured results | [TESTING.md](TESTING.md) · [RESULTS.md](RESULTS.md) |
+| The candidate 2-byte patch's risk write-up | [docs/patch.md](docs/patch.md) |
+| Interactive frame-cycle timeline (GitHub Pages) | [the per-frame bracket timing page](https://darthnut.github.io/a7rv-firmware-analysis/docs/frame-cycle.html) |
 
 ---
 
-# Investigation 3 — a7R VI firmware (blocked)
+## Status
 
-**The question:** can the same approach read the newer a7R VI body firmware?
+- **Investigation 1 (focus-bracket cadence): settled.** Two regimes, two limiters, neither a
+  camera-firmware timer. No worthwhile firmware lever. Confirmed by bench measurement + full static
+  sweep of `cpapp-b.bin` and `av-cam.bin`.
+- **Investigation 2 (service mode): mapped end to end, one observe-only hardware session run.** Auth
+  decode confirmed live on an owned body; the raw memory-dump verb (`0xff03`) returned locked. No
+  writes issued.
+- **Investigation 3 (a7R VI): blocked** at the crypto layer; recorded as a boundary.
+- **Subsystem reference: 21 studies complete**, each verified against the binaries, each with its
+  verification status and static boundary. The crypto/keystore spine and the service-mode chain are
+  the two fully-traced structures; both terminate at an out-of-image provider, which is recorded
+  rather than guessed past.
 
-**Answer: no — blocked at the crypto, and no feature claims are made from it.** The a7R
-VI update package (`BODYDATA`, ~338 MB) is the same UFU container family, but the
-package-format version has moved on (`DATV = 04` vs the a7R V's `01`) and the payload
-is **fully encrypted** — entropy 8.00/8 throughout, no plaintext islands. The a7R V
-(Gen5) AES keys were tested against every plausible header / frame / trailer split and
-produced **zero valid checksums**: they do not apply. The 338 MB size (vs the a7R V's
-751 MB plaintext) suggests a **partial / delta** package rather than a full image.
-
-For reference, the a7R V updater the keys *do* open has this container layout — our
-mapping, with **no keys or payload reproduced**: an `89 55 46 55 0d 0a 1a 0a` magic,
-then big-endian `{u32 size, u32 tag}` chunks — `DATV` (format version: `1` on the a7R V,
-`4` on the a7R VI), `PROV`, `UDID` (92 bytes on the a7R V, 44 on the a7R VI), the `FDAT`
-payload, and `DEND` + a CRC-32 over the preceding bytes. `FDAT` is 1024-byte frames
-(each a 2-byte word-sum checksum + a flags word, `bit15` = last frame), the first frame's
-leading 512 bytes under a header cipher, and a trailer of a 16-byte IV plus a 256-byte
-RSA-2048 signature. The AES decryption of that payload is the community's work (credited
-below), not ours; the **container framing** is what this project mapped, and it is the
-shareable part.
-
-Reading it would require the a7R VI generation's updater keys (the kind of thing that
-historically comes from community RE of the updater), or a flash dump taken off the
-body directly. Until then, **nothing about a7R VI features can be asserted from this
-file** — anything claimed would be speculation, and is deliberately not recorded here.
+Nothing here is validated on hardware beyond the single observe-only service-mode session. This is a
+static map; the open items are in [OPEN-QUESTIONS.md](OPEN-QUESTIONS.md).
 
 ---
 
 ## Acknowledgments & prior work
 
-**This project did not break the firmware encryption.** Being able to read the a7R V
-firmware at all rests entirely on earlier community reverse-engineering, which this
-project only *applied* — a small script lifts their published keys and container layout
-and runs them on a package you supply; it derives nothing cryptographic. Credit for
-getting inside Sony's Gen5 (CXD9005x / BIONZ XR) firmware belongs to:
+**This project did not break the firmware encryption.** Being able to read the a7R V firmware at all
+rests entirely on earlier community reverse-engineering, which this project only *applied* — a small
+script lifts their published keys and container layout and runs them on a package you supply; it
+derives nothing cryptographic. Credit for getting inside Sony's Gen5 (CXD9005x / BIONZ XR) firmware
+belongs to:
 
-- **[q19032/Sony-firmware-unpacker](https://github.com/q19032/Sony-firmware-unpacker)**
-  — firmware **decryption and key derivation** (the update-package crypto: the `FF03`
-  memory read on the CXD9005x and the `SHA256(…)` key formula). This is the work that
-  makes the package readable.
-- **[David Buchanan — `ILCE-7M4-RE`](https://github.com/DavidBuchanan314/ILCE-7M4-RE)**
-  (and [`Sony-ILCE-7M4-Linux`](https://github.com/DavidBuchanan314/Sony-ILCE-7M4-Linux))
-  — the foundational boot-ROM / serial-boot / eMMC reverse engineering on the CXD90057
-  generation: getting code running low enough to pull secrets off the silicon. The hard
-  part.
+- **[q19032/Sony-firmware-unpacker](https://github.com/q19032/Sony-firmware-unpacker)** — firmware
+  **decryption and key derivation** (the update-package crypto: the `FF03` memory read on the
+  CXD9005x and the `SHA256(…)` key formula). This is the work that makes the package readable.
+- **[David Buchanan — `ILCE-7M4-RE`](https://github.com/DavidBuchanan314/ILCE-7M4-RE)** (and
+  [`Sony-ILCE-7M4-Linux`](https://github.com/DavidBuchanan314/Sony-ILCE-7M4-Linux)) — the
+  foundational boot-ROM / serial-boot / eMMC reverse engineering on the CXD90057 generation: getting
+  code running low enough to pull secrets off the silicon. The hard part.
 - **[ma1co — `fwtool.py`](https://github.com/ma1co/fwtool.py)** and
-  **[`Sony-PMCA-RE`](https://github.com/ma1co/Sony-PMCA-RE)** — the firmware **container
-  format / unpacking** and the Sony camera **service protocol** (the SENSER system
-  Investigation 2 re-derives and credits in full above).
-- **[masterflai — `pmca-re-reloaded`](https://github.com/masterflai/pmca-re-reloaded)** —
-  a maintained Rust port of `ma1co`'s `Sony-PMCA-RE` (USB transport, Windows drivers, a
-  tested service shell). The first observe-only hardware session in Investigation 2 was
-  run with it.
-- **[Erlla — `sony-a7m4-custom-firmware`](https://github.com/Erlla/sony-a7m4-custom-firmware)**
-  — brought the above together into working A7 IV custom-firmware tooling.
+  **[`Sony-PMCA-RE`](https://github.com/ma1co/Sony-PMCA-RE)** — the firmware **container format /
+  unpacking** and the Sony camera **service protocol** (the SENSER system Investigation 2
+  re-derives and credits in full).
+- **[masterflai — `pmca-re-reloaded`](https://github.com/masterflai/pmca-re-reloaded)** — a
+  maintained Rust port of `ma1co`'s `Sony-PMCA-RE` (USB transport, Windows drivers, a tested service
+  shell). The first observe-only hardware session in Investigation 2 was run with it.
+- **[Erlla — `sony-a7m4-custom-firmware`](https://github.com/Erlla/sony-a7m4-custom-firmware)** —
+  brought the above together into working A7 IV custom-firmware tooling.
 - **[Hearts-Ace — `sony-a7r5-custom-firmware`](https://github.com/Hearts-Ace/sony-a7r5-custom-firmware)**
-  — carried the scheme to the a7R V (ILCE-7RM5) and confirmed the a7 IV keys and
-  container apply unchanged — which is why the Ver. 4.00 package here decrypts with the
-  a7 IV constants.
+  — carried the scheme to the a7R V (ILCE-7RM5) and confirmed the a7 IV keys and container apply
+  unchanged — which is why the Ver. 4.00 package here decrypts with the a7 IV constants.
 
-One precise point, because it bounds what any of this makes possible: the keys above
-decrypt the **update package** (the FDAT layer), which is a *different* key system from
-the **eMMC AES-XTS** encryption on the camera itself. "We can read the firmware" and
-"we can flash a modified one onto a body" rest on different pieces of the upstream work,
-and **only reading is settled** — this project stays on the reading side.
+One precise point, because it bounds what any of this makes possible: the keys above decrypt the
+**update package** (the FDAT layer), which is a *different* key system from the **eMMC AES-XTS**
+encryption on the camera itself. "We can read the firmware" and "we can flash a modified one onto a
+body" rest on different pieces of the upstream work, and **only reading is settled** — this project
+stays on the reading side.
 
 ### Related work — parallel efforts
 
-Separate from the upstream this builds on, a few projects reverse-engineer
-*current-generation* Sony bodies in ways that run close to this one:
-
-- **[t2r05 — ILME-FX30 service-mode research](https://github.com/t2r05/fx30-senser-map)**
-  — maps the FX30's USB service session (Senser / Jiritsu) on fw 6.00/6.01: which
-  channels are reachable, what the data looks like, and a reproducible hidden-burst
-  enable via an equal-length firmware patch. Same generation and the same
-  offsets-not-binaries ethos as this repo; it parallels Investigation 2's service-mode
-  work closely.
-- **[YuuLuo — A7C II Camera Tools](https://github.com/YuuLuo/a7c2-camera-tools)** —
-  reproducible firmware tooling for the ILCE-7CM2: a service-mode (Jiritsu) worker that
-  builds a patched 2.00 DAT to enable Creative Look modes and the shutter sound. More
-  applied modding than static write-up, but the same modern-body service machinery.
-- **[ma1co — OpenMemories-Symbols](https://github.com/ma1co/OpenMemories-Symbols)** — a
-  database of reverse-engineered firmware symbols (`bin2elf` for `av.bin`): the
-  symbol-naming side of this kind of work, for a few older bodies.
-- **[obs1dium — FocusBracket](https://github.com/obs1dium/FocusBracket)** — an early
-  (2016, A5100) proof-of-concept that drove focus bracketing from the OpenMemories app
-  layer, before Sony shipped the feature natively. Thematically adjacent to
-  Investigation 1, though it uses the public app API rather than touching the capture
-  pipeline.
+- **[t2r05 — ILME-FX30 service-mode research](https://github.com/t2r05/fx30-senser-map)** — maps the
+  FX30's USB service session (Senser / Jiritsu) on fw 6.00/6.01: which channels are reachable, what
+  the data looks like, and a reproducible hidden-burst enable via an equal-length firmware patch.
+  Same generation and the same offsets-not-binaries ethos as this repo; it parallels Investigation
+  2's service-mode work closely.
+- **[YuuLuo — A7C II Camera Tools](https://github.com/YuuLuo/a7c2-camera-tools)** — reproducible
+  firmware tooling for the ILCE-7CM2: a service-mode (Jiritsu) worker that builds a patched 2.00 DAT
+  to enable Creative Look modes and the shutter sound. More applied modding than static write-up, but
+  the same modern-body service machinery.
+- **[ma1co — OpenMemories-Symbols](https://github.com/ma1co/OpenMemories-Symbols)** — a database of
+  reverse-engineered firmware symbols (`bin2elf` for `av.bin`): the symbol-naming side of this kind
+  of work, for a few older bodies.
+- **[obs1dium — FocusBracket](https://github.com/obs1dium/FocusBracket)** — an early (2016, A5100)
+  proof-of-concept that drove focus bracketing from the OpenMemories app layer, before Sony shipped
+  the feature natively. Thematically adjacent to Investigation 1, though it uses the public app API
+  rather than touching the capture pipeline.
 
 ---
 
-## Method
-
-- Target: `cpapp-b.bin` (flat ARM/Thumb-2 image, Ghidra load base `0x00108000`).
-- Tooling: Ghidra 12.2 headless + Temurin JDK 25; scripts to force Thumb mode, dump
-  xrefs/callers, and resolve `movw`/`movt` immediate address pairs (this firmware
-  builds RAM addresses with immediate pairs, not literal pools — a naïve literal
-  scan finds nothing, which is a trap). Byte-level checks with a standalone Python
-  verifier.
-- Empirical cadence measured from each frame's EXIF `DateTimeOriginal` +
-  `SubSecTimeOriginal`, segmented into stacks by time gap and reported in VD fields.
-- AI assistance: much of the firmware digging was done with **GLM-5.3**; every finding
-  was verified against the binary (and, where stated, against the hardware) before it was
-  recorded here.
-- See [docs/method.md](docs/method.md) for detail.
-
 ## Legal & safety
 
-- This is reverse engineering of **my own camera**, for interoperability and
-  understanding. **No Sony firmware is redistributed here** — only byte offsets and
-  derived analysis.
-- Apart from the one **observe-only** service-mode session in Investigation 2 (no writes),
-  nothing here is validated on hardware. Modifying and flashing camera firmware can
-  **permanently brick** the device and will void any warranty. If you act on this,
-  do it only on a body you are prepared to lose, and only after an empirical test
-  gives a reason to.
+- This is reverse engineering of **my own camera**, for interoperability and understanding. **No
+  Sony firmware is redistributed here** — only byte offsets and derived analysis.
+- Apart from the one **observe-only** service-mode session in
+  [Investigation 2](investigations/02-service-mode-and-auth.md) (no writes), nothing here is
+  validated on hardware. Modifying and flashing camera firmware can **permanently brick** the device
+  and will void any warranty. If you act on this, do it only on a body you are prepared to lose, and
+  only after an empirical test gives a reason to.
+- Much of the firmware digging was done with AI assistance (GLM-5.3, and a local Flash-Next
+  model driving Ghidra); **every finding was verified against the binary** — and, where stated,
+  against the hardware — before it was recorded. See [method/](method/README.md).
